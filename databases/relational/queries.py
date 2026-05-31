@@ -25,6 +25,9 @@ import string
 from datetime import datetime, timezone
 from typing import Optional
 
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, VerificationError
+
 import psycopg2
 import psycopg2.extras
 
@@ -40,6 +43,23 @@ def _connect():
     conn = psycopg2.connect(PG_DSN)
     conn.autocommit = True
     return conn
+
+ph = PasswordHasher()
+
+
+def _hash_password(password: str) -> str:
+    return ph.hash(password)
+
+
+def _verify_password(stored_hash: str, password: str) -> tuple[bool, bool]:
+    """
+    Return (is_valid, needs_rehash).
+    """
+    try:
+        ph.verify(stored_hash, password)
+        return True, ph.check_needs_rehash(stored_hash)
+    except (VerifyMismatchError, VerificationError):
+        return False, False
 
 
 def _gen_booking_id() -> str:
@@ -147,7 +167,49 @@ def _ensure_user_auth_columns(cur):
             """
         )
 
-    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password TEXT;")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_credentials (
+            user_id VARCHAR(30) PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT fk_user_credentials_user
+                FOREIGN KEY (user_id)
+                REFERENCES users(user_id)
+                ON DELETE CASCADE
+        )
+        """
+    )
+
+    if _column_exists(cur, "users", "password"):
+        cur.execute(
+            """
+            SELECT user_id, password
+            FROM users
+            WHERE password IS NOT NULL
+              AND user_id NOT IN (SELECT user_id FROM user_credentials)
+            """
+        )
+        for user_id, plain_password in cur.fetchall():
+            try:
+                password_hash = _hash_password(str(plain_password))
+            except Exception:
+                continue
+
+            cur.execute(
+                """
+                INSERT INTO user_credentials (
+                    user_id,
+                    password_hash,
+                    created_at,
+                    updated_at
+                ) VALUES (%s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT DO NOTHING
+                """,
+                (user_id, password_hash),
+            )
+
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name VARCHAR(100);")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS surname VARCHAR(100);")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS date_of_birth DATE;")
@@ -895,7 +957,6 @@ def register_user(
                         full_name,
                         email,
                         phone,
-                        password,
                         first_name,
                         surname,
                         date_of_birth,
@@ -905,7 +966,7 @@ def register_user(
                         created_at
                     )
                     VALUES (
-                        %s, %s, %s, NULL, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, NULL, %s, %s, %s, %s, %s,
                         TRUE, CURRENT_TIMESTAMP
                     )
                     """,
@@ -913,13 +974,25 @@ def register_user(
                         user_id,
                         full_name,
                         email,
-                        password,
                         first_name,
                         surname,
                         date_of_birth,
                         secret_question,
                         secret_answer,
                     ),
+                )
+
+                password_hash = _hash_password(password)
+                cur.execute(
+                    """
+                    INSERT INTO user_credentials (
+                        user_id,
+                        password_hash,
+                        created_at,
+                        updated_at
+                    ) VALUES (%s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (user_id, password_hash),
                 )
 
                 return True, user_id
@@ -942,16 +1015,43 @@ def login_user(email: str, password: str) -> Optional[dict]:
 
             cur.execute(
                 """
-                SELECT *
-                FROM users
-                WHERE LOWER(email) = LOWER(%s)
-                  AND COALESCE(password, '') = %s
-                  AND COALESCE(is_active, TRUE) = TRUE
+                SELECT u.*, uc.password_hash
+                FROM users u
+                JOIN user_credentials uc ON uc.user_id = u.user_id
+                WHERE LOWER(u.email) = LOWER(%s)
+                  AND COALESCE(u.is_active, TRUE) = TRUE
                 """,
-                (email.strip(), password),
+                (email.strip(),),
             )
 
             row = cur.fetchone()
+
+            if not row:
+                return None
+
+            password_hash = row.pop("password_hash", None)
+
+            if not password_hash:
+                return None
+
+            valid, needs_rehash = _verify_password(password_hash, password)
+            if not valid:
+                return None
+
+            if needs_rehash:
+                try:
+                    new_hash = _hash_password(password)
+                    cur.execute(
+                        """
+                        UPDATE user_credentials
+                        SET password_hash = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE user_id = %s
+                        """,
+                        (new_hash, row["user_id"]),
+                    )
+                except Exception:
+                    pass
 
     if not row:
         return None
@@ -1037,14 +1137,35 @@ def update_password(email: str, new_password: str) -> bool:
 
             cur.execute(
                 """
-                UPDATE users
-                SET password = %s
+                SELECT user_id
+                FROM users
                 WHERE LOWER(email) = LOWER(%s)
                 """,
-                (new_password, email.strip()),
+                (email.strip(),),
+            )
+            row = cur.fetchone()
+            if not row:
+                return False
+
+            user_id = row[0]
+            password_hash = _hash_password(new_password)
+
+            cur.execute(
+                """
+                INSERT INTO user_credentials (
+                    user_id,
+                    password_hash,
+                    created_at,
+                    updated_at
+                ) VALUES (%s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id) DO UPDATE
+                SET password_hash = EXCLUDED.password_hash,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (user_id, password_hash),
             )
 
-            return cur.rowcount > 0
+            return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────

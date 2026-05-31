@@ -141,10 +141,6 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(150) UNIQUE NOT NULL,
     phone VARCHAR(50),
 
-    -- For this course project demo only.
-    -- In a real system, passwords should be hashed, not stored as plain text.
-    password TEXT,
-
     date_of_birth DATE,
 
     secret_question TEXT,
@@ -153,6 +149,17 @@ CREATE TABLE IF NOT EXISTS users (
     is_active BOOLEAN DEFAULT TRUE,
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_credentials (
+    user_id VARCHAR(30) PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_user_credentials_user
+        FOREIGN KEY (user_id)
+        REFERENCES users(user_id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email

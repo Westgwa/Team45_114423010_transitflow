@@ -29,6 +29,7 @@ import os
 import sys
 from typing import Any
 
+from argon2 import PasswordHasher
 import psycopg2
 from psycopg2.extras import execute_values
 
@@ -41,6 +42,7 @@ DATA_DIR = os.path.join(PROJECT_DIR, "train-mock-data")
 
 sys.path.insert(0, PROJECT_DIR)
 
+ph = PasswordHasher()
 from skeleton import config as cfg  # noqa: E402
 
 
@@ -330,7 +332,6 @@ def seed_users(cur):
                 surname,
                 item["email"],
                 item.get("phone"),
-                item.get("password", "password123"),
                 item.get("date_of_birth"),
                 item.get("secret_question", "What is your favourite station?"),
                 item.get("secret_answer", "central"),
@@ -349,7 +350,6 @@ def seed_users(cur):
             "surname",
             "email",
             "phone",
-            "password",
             "date_of_birth",
             "secret_question",
             "secret_answer",
@@ -360,6 +360,31 @@ def seed_users(cur):
     )
 
     print(f"  users: {inserted} rows inserted / {len(rows)} prepared")
+
+    if table_exists(cur, "user_credentials"):
+        credential_rows = []
+        for item in data:
+            password = item.get("password", "password123")
+            credential_rows.append(
+                (
+                    item["user_id"],
+                    ph.hash(password),
+                    item.get("registered_at") or item.get("created_at"),
+                    item.get("registered_at") or item.get("created_at"),
+                )
+            )
+
+        inserted_credentials = insert_many(
+            cur,
+            "user_credentials",
+            ["user_id", "password_hash", "created_at", "updated_at"],
+            credential_rows,
+        )
+        print(
+            f"  user_credentials: {inserted_credentials} rows inserted / {len(credential_rows)} prepared"
+        )
+    else:
+        print("  user_credentials: table not found, skipped")
 
 
 def seed_national_rail_bookings(cur):
