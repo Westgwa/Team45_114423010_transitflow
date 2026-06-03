@@ -189,7 +189,12 @@ CREATE TABLE IF NOT EXISTS seat_layouts (
     is_window BOOLEAN DEFAULT FALSE,
     is_aisle BOOLEAN DEFAULT FALSE,
 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_seat_layouts_schedule
+        FOREIGN KEY (schedule_id)
+        REFERENCES national_rail_schedules(schedule_id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_seat_layouts_schedule
@@ -233,7 +238,17 @@ CREATE TABLE IF NOT EXISTS bookings (
     CONSTRAINT fk_bookings_user
         FOREIGN KEY (user_id)
         REFERENCES users(user_id)
-        ON DELETE SET NULL
+        ON DELETE SET NULL,
+
+    CONSTRAINT fk_bookings_schedule
+        FOREIGN KEY (schedule_id)
+        REFERENCES national_rail_schedules(schedule_id)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_bookings_seat
+        FOREIGN KEY (seat_id)
+        REFERENCES seat_layouts(seat_id)
+        ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_bookings_user
@@ -275,6 +290,11 @@ CREATE TABLE IF NOT EXISTS metro_trips (
     CONSTRAINT fk_metro_trips_user
         FOREIGN KEY (user_id)
         REFERENCES users(user_id)
+        ON DELETE SET NULL,
+
+    CONSTRAINT fk_metro_trips_schedule
+        FOREIGN KEY (schedule_id)
+        REFERENCES metro_schedules(schedule_id)
         ON DELETE SET NULL
 );
 
@@ -304,7 +324,17 @@ CREATE TABLE IF NOT EXISTS payments (
     payment_status VARCHAR(30) DEFAULT 'paid',
 
     paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_payments_booking
+        FOREIGN KEY (booking_id)
+        REFERENCES bookings(booking_id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT fk_payments_user
+        FOREIGN KEY (user_id)
+        REFERENCES users(user_id)
+        ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_payments_booking
@@ -331,7 +361,17 @@ CREATE TABLE IF NOT EXISTS feedback (
     rating INT,
     comment TEXT,
 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_feedback_user
+        FOREIGN KEY (user_id)
+        REFERENCES users(user_id)
+        ON DELETE SET NULL,
+
+    CONSTRAINT fk_feedback_booking
+        FOREIGN KEY (booking_id)
+        REFERENCES bookings(booking_id)
+        ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_feedback_user
