@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS seat_layouts (
     carriage_no VARCHAR(20),
     seat_no VARCHAR(20),
 
-    fare_class VARCHAR(30) DEFAULT 'standard',
+    fare_class VARCHAR(30) DEFAULT 'standard' CHECK (fare_class IN ('standard', 'first')),
 
     -- optional metadata
     seat_type VARCHAR(30),
@@ -223,11 +223,11 @@ CREATE TABLE IF NOT EXISTS bookings (
 
     travel_date DATE,
 
-    fare_class VARCHAR(30) DEFAULT 'standard',
+    fare_class VARCHAR(30) DEFAULT 'standard' CHECK (fare_class IN ('standard', 'first')),
     seat_id VARCHAR(50),
     ticket_type VARCHAR(30) DEFAULT 'single',
 
-    status VARCHAR(30) DEFAULT 'active',
+    status VARCHAR(30) DEFAULT 'active' CHECK (status IN ('active', 'confirmed', 'completed', 'cancelled')),
 
     price_paid_usd NUMERIC(10, 2),
     refund_amount_usd NUMERIC(10, 2) DEFAULT 0.00,
@@ -321,7 +321,7 @@ CREATE TABLE IF NOT EXISTS payments (
 
     amount_usd NUMERIC(10, 2),
     payment_method VARCHAR(50),
-    payment_status VARCHAR(30) DEFAULT 'paid',
+    payment_status VARCHAR(30) DEFAULT 'paid' CHECK (payment_status IN ('paid', 'pending', 'failed', 'refunded')),
 
     paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
