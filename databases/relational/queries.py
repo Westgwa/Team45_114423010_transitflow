@@ -34,13 +34,15 @@ from skeleton.config import PG_DSN, VECTOR_TOP_K, VECTOR_SIMILARITY_THRESHOLD
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 優化 1：全域連線池 (Global Connection Pool) 與安全借還機制
+# Optimization 1: Global Connection Pool and safe borrow/return mechanism
 # ─────────────────────────────────────────────────────────────────────────────
 
 _PG_POOL = None
 
 def _get_pool():
-    """延遲初始化連線池，確保只在需要時建立一次，避免啟動時的連線衝突"""
+    """Lazily initialize the connection pool so it is created only when needed,
+    avoiding connection spikes during application startup.
+    """
     global _PG_POOL
     if _PG_POOL is None:
         # 初始化連線池 (最小連線數 1，最大連線數 20)
@@ -48,7 +50,9 @@ def _get_pool():
     return _PG_POOL
 
 def close_pool():
-    """提供給應用程式關閉時（如 FastAPI shutdown event）釋放連線池資源的介面"""
+    """Provide an interface for the application to close (e.g. on FastAPI shutdown)
+    and release the connection pool resources.
+    """
     global _PG_POOL
     if _PG_POOL is not None:
         _PG_POOL.closeall()
@@ -56,9 +60,9 @@ def close_pool():
 
 @contextmanager
 def get_db_connection():
-    """
-    優化 2：安全的連線借還機制 (Context Manager)
-    取代原本每次重新建立連線的 _connect() 函式。
+    """Optimization 2: Safe connection borrow/return mechanism (Context Manager).
+    Replaces the previous `_connect()` function which created a new connection
+    on every call.
     """
     pool_instance = _get_pool()
     conn = pool_instance.getconn()
@@ -66,7 +70,8 @@ def get_db_connection():
     try:
         yield conn
     finally:
-        # 確保無論查詢成功或發生例外，連線都會被歸還到池中
+        # Ensure the connection is returned to the pool whether the query
+        # succeeds or an exception occurs.
         pool_instance.putconn(conn)
 
 
