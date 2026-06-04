@@ -32,6 +32,7 @@ from psycopg2 import pool
 
 from skeleton.config import PG_DSN, VECTOR_TOP_K, VECTOR_SIMILARITY_THRESHOLD
 
+# TASK 6 EXTENSION: Added booking analytics query for bonus eligibility.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Optimization 1: Global Connection Pool and safe borrow/return mechanism
@@ -199,6 +200,56 @@ def example_query() -> dict:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT current_database() AS db;")
             return dict(cur.fetchone())
+
+
+def query_booking_revenue_summary(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> dict:
+    """
+    Return summary metrics for national rail bookings and payments.
+
+    This function aggregates booking counts, revenue, refunds, and active
+    booking status from the `bookings` table. It is useful for analytics
+    dashboards or operational reports.
+    """
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Filter the query by date range when provided, otherwise include all rows.
+            sql = """
+                SELECT
+                    COUNT(*) AS total_bookings,
+                    COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) NOT IN ('cancelled', 'canceled')) AS active_bookings,
+                    COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) IN ('cancelled', 'canceled')) AS cancelled_bookings,
+                    COALESCE(SUM(price_paid_usd), 0) AS total_revenue_usd,
+                    COALESCE(SUM(refund_amount_usd), 0) AS total_refunds_usd
+                FROM bookings
+                WHERE 1=1
+            """
+
+            params: list[str] = []
+
+            if start_date:
+                sql += "\n                  AND travel_date >= %s"
+                params.append(start_date)
+
+            if end_date:
+                sql += "\n                  AND travel_date <= %s"
+                params.append(end_date)
+
+            cur.execute(sql, tuple(params))
+            record = cur.fetchone()
+
+            # Return a clear JSON object for downstream tools or dashboards.
+            return {
+                "total_bookings": record["total_bookings"],
+                "active_bookings": record["active_bookings"],
+                "cancelled_bookings": record["cancelled_bookings"],
+                "total_revenue_usd": float(record["total_revenue_usd"] or 0),
+                "total_refunds_usd": float(record["total_refunds_usd"] or 0),
+                "start_date": start_date,
+                "end_date": end_date,
+            }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
