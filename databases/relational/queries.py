@@ -648,6 +648,78 @@ def query_user_bookings(user_email: str) -> list[dict]:
             return [dict(row) for row in cur.fetchall()]
 
 
+def query_trip_history(user_email: str, limit: int = 20) -> dict:
+    """
+    Return a detailed trip history panel for logged-in users.
+    
+    This function retrieves completed and upcoming bookings with full
+    station name details, fare information, and refund status.
+    Useful for displaying a trip history panel in the UI.
+    """
+    profile = query_user_profile(user_email)
+
+    if not profile:
+        return {"error": "User profile not found.", "trips": []}
+
+    user_id = profile["user_id"]
+
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if not _table_exists(cur, "bookings"):
+                return {"user_id": user_id, "trips": []}
+
+            # Retrieve booking details joined with schedule info.
+            # Include origin/destination station names and fare class.
+            cur.execute(
+                """
+                SELECT
+                    b.booking_id,
+                    b.schedule_id,
+                    b.origin_station_id,
+                    b.destination_station_id,
+                    b.travel_date,
+                    b.fare_class,
+                    b.seat_id,
+                    b.ticket_type,
+                    b.status,
+                    b.price_paid_usd,
+                    b.refund_amount_usd,
+                    b.booked_at,
+                    b.cancelled_at,
+                    s.line,
+                    s.service_type
+                FROM bookings b
+                LEFT JOIN national_rail_schedules s
+                    ON s.schedule_id = b.schedule_id
+                WHERE b.user_id = %s
+                ORDER BY b.travel_date DESC NULLS LAST, b.booked_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                (user_id, limit),
+            )
+
+            trips = []
+            for row in cur.fetchall():
+                trip_dict = dict(row)
+                
+                # Format readable trip entry
+                trip_dict["trip_summary"] = (
+                    f"{trip_dict.get('origin_station_id')} → {trip_dict.get('destination_station_id')} | "
+                    f"{trip_dict.get('travel_date')} | "
+                    f"{trip_dict.get('fare_class', 'standard')} | "
+                    f"${trip_dict.get('price_paid_usd', 0):.2f}"
+                )
+                
+                trips.append(trip_dict)
+
+            return {
+                "user_id": user_id,
+                "user_email": profile.get("email"),
+                "total_trips_retrieved": len(trips),
+                "trips": trips,
+            }
+
+
 def query_payment_info(booking_id: str) -> Optional[dict]:
     """
     Return payment information if a payments table exists.

@@ -23,6 +23,7 @@ from databases.relational.queries import (
     verify_secret_answer,
     update_password,
     query_booking_revenue_summary,
+    query_trip_history,
 )
 
 SECRET_QUESTIONS = [
@@ -266,6 +267,44 @@ def get_booking_analytics(start_date: str, end_date: str):
     return render_booking_summary(summary)
 
 
+def render_trip_history(user_email: str) -> str:
+    """Format trip history into a markdown-friendly display."""
+    if not user_email:
+        return "Please log in to view your trip history."
+
+    history = query_trip_history(user_email, limit=10)
+
+    if "error" in history:
+        return f"Error: {history.get('error')}"
+
+    trips = history.get("trips", [])
+    if not trips:
+        return "No trips found in your history."
+
+    # Build a markdown table of trips
+    lines = [
+        "## Your Trip History",
+        "",
+        "| Booking ID | From | To | Date | Fare Class | Amount | Status |",
+        "|---|---|---|---|---|---|---|",
+    ]
+
+    for trip in trips:
+        booking_id = trip.get("booking_id", "—")
+        origin = trip.get("origin_station_id", "—")
+        destination = trip.get("destination_station_id", "—")
+        travel_date = trip.get("travel_date", "—")
+        fare_class = trip.get("fare_class", "standard")
+        price = f"${trip.get('price_paid_usd', 0):.2f}"
+        status = trip.get("status", "unknown").capitalize()
+
+        lines.append(
+            f"| {booking_id} | {origin} | {destination} | {travel_date} | {fare_class} | {price} | {status} |"
+        )
+
+    return "\n".join(lines)
+
+
 # ── Panel visibility toggles ──────────────────────────────────────────────────
 
 def show_login_panel():
@@ -400,7 +439,11 @@ with gr.Blocks(title="TransitFlow") as demo:
             analytics_output = gr.Markdown(value="No analytics data loaded yet.")
 
             gr.Markdown("---")
+            gr.Markdown("### 🛫 Trip History")
+            trip_history_button = gr.Button("Load my trip history", variant="primary", size="sm")
+            trip_history_output = gr.Markdown(value="Log in to view your trips.")
 
+            gr.Markdown("---")
             gr.Markdown("### �💡 Try these examples")
             for example in EXAMPLES:
                 gr.Button(example, size="sm").click(
@@ -432,6 +475,12 @@ with gr.Blocks(title="TransitFlow") as demo:
         fn=get_booking_analytics,
         inputs=[analytics_start_date, analytics_end_date],
         outputs=[analytics_output],
+    )
+
+    trip_history_button.click(
+        fn=render_trip_history,
+        inputs=[current_user_state],
+        outputs=[trip_history_output],
     )
 
     clear_btn.click(
