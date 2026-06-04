@@ -8,8 +8,9 @@ from neo4j import GraphDatabase
 from skeleton.config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
 
 # =========================================================================
-# 優化 1：將 Driver 改為全域單例 (Singleton)
-# Neo4j Driver 物件很重，且內部已自帶連線池。全域維持一個實例即可。
+# Optimization 1: Use a global singleton for the Driver
+# The Neo4j Driver is heavy and includes an internal connection pool.
+# Keep a single global instance to reuse connections.
 # =========================================================================
 _driver_instance = None
 
@@ -20,7 +21,9 @@ def _get_driver():
     return _driver_instance
 
 def close_driver():
-    """提供給應用程式關閉（如 FastAPI shutdown event）時釋放連線池資源的介面"""
+    """Provide an interface for the application to close (e.g. on FastAPI shutdown)
+    and release the driver's connection pool resources.
+    """
     global _driver_instance
     if _driver_instance is not None:
         _driver_instance.close()
@@ -65,11 +68,11 @@ def query_shortest_route(origin_id: str, destination_id: str, network: str = "au
     network_condition = _network_filter(network)
 
     cypher = f"""
-    // 【步驟一：定位起點與終點】
+    // [Step 1: Locate the start and end nodes]
     MATCH (start:Station {{station_id: $origin_id}})
     MATCH (end:Station {{station_id: $destination_id}})
     
-    // 【步驟二：呼叫核心演算法】
+    // [Step 2: Call core algorithm]
     CALL apoc.algo.dijkstra(
         start,                             
         end,                               
@@ -77,10 +80,10 @@ def query_shortest_route(origin_id: str, destination_id: str, network: str = "au
         'travel_time_min'                  
     ) YIELD path, weight                   
     
-    // 【步驟三：套用外部篩選條件】
+    // [Step 3: Apply external filter conditions]
     WHERE {network_condition}
     
-    // 【步驟四：整理並回傳最終結果】
+    // [Step 4: Format and return the final result]
     RETURN 
         weight AS total_time,
         [n IN nodes(path) | {{
@@ -119,11 +122,11 @@ def query_cheapest_route(origin_id: str, destination_id: str, network: str = "au
     network_condition = _network_filter(network)
 
     cypher = f"""
-    // 【步驟一：定位起點與終點】
+    // [Step 1: Locate the start and end nodes]
     MATCH (start:Station {{station_id: $origin_id}})
     MATCH (end:Station {{station_id: $destination_id}})
     
-    // 【步驟二：呼叫核心演算法 (替換權重為票價)】
+    // [Step 2: Call core algorithm (weight replaced by fare)]
     CALL apoc.algo.dijkstra(
         start,                                
         end,                                  
@@ -131,10 +134,10 @@ def query_cheapest_route(origin_id: str, destination_id: str, network: str = "au
         'fare'                                
     ) YIELD path, weight                   
     
-    // 【步驟三：套用外部網路篩選條件】
+    // [Step 3: Apply external network filter conditions]
     WHERE {network_condition}
     
-    // 【步驟四：整理並回傳最終結果】
+    // [Step 4: Format and return the final result]
     RETURN 
         weight AS total_fare,              
         [n IN nodes(path) | {{
@@ -233,7 +236,7 @@ def query_alternative_routes(
     """
 
     # =========================================================================
-    # 優化 2：修正原程式碼中重複堆疊 4 次的 Copy-Paste Bug，精簡為單一執行區塊
+    # Optimization 2: Fix original code's 4x copy-paste bug and simplify into one execution block
     # =========================================================================
     driver = _get_driver()
     with driver.session() as session:
