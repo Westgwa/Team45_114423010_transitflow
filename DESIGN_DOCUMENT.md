@@ -12,6 +12,10 @@ This extension is intentionally database-focused, because database extensions ar
 
 - Added a new analytics function in `databases/relational/queries.py`:
   - `query_booking_revenue_summary(start_date: Optional[str] = None, end_date: Optional[str] = None) -> dict`
+- Added a new analytics dashboard panel in `skeleton/ui.py`:
+  - sidebar inputs for `Start date` and `End date`
+  - refresh button producing a booking revenue summary display
+  - surfaces analytics data that the chat-only UI did not previously show
 - This function queries the `bookings` table in PostgreSQL and returns:
   - `total_bookings`
   - `active_bookings`

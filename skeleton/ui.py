@@ -7,6 +7,8 @@ Then open: http://localhost:7860
 Students: You do NOT need to change this file.
 """
 
+# TASK 6 EXTENSION: Added an analytics dashboard panel to surface booking revenue data.
+
 import sys
 sys.path.insert(0, ".")
 
@@ -20,6 +22,7 @@ from databases.relational.queries import (
     get_user_secret_question,
     verify_secret_answer,
     update_password,
+    query_booking_revenue_summary,
 )
 
 SECRET_QUESTIONS = [
@@ -238,6 +241,31 @@ def forgot_reset_password(email: str, answer: str, new_password: str):
     return gr.update(value="**Password reset successfully. You can now log in.**", visible=True)
 
 
+def render_booking_summary(summary: dict) -> str:
+    """Convert booking summary metrics into a markdown-friendly string."""
+    if not summary:
+        return "No analytics data available."
+
+    return "\n".join([
+        f"**Booking Analytics Dashboard**",
+        f"- Total bookings: **{summary.get('total_bookings', 0)}**",
+        f"- Active bookings: **{summary.get('active_bookings', 0)}**",
+        f"- Cancelled bookings: **{summary.get('cancelled_bookings', 0)}**",
+        f"- Total revenue (USD): **${summary.get('total_revenue_usd', 0):,.2f}**",
+        f"- Total refunds (USD): **${summary.get('total_refunds_usd', 0):,.2f}**",
+        f"- Date range: **{summary.get('start_date') or 'all'}** to **{summary.get('end_date') or 'all'}**",
+    ])
+
+
+def get_booking_analytics(start_date: str, end_date: str):
+    """Fetch booking analytics summary for the given date range."""
+    summary = query_booking_revenue_summary(
+        start_date=start_date.strip() or None,
+        end_date=end_date.strip() or None,
+    )
+    return render_booking_summary(summary)
+
+
 # ── Panel visibility toggles ──────────────────────────────────────────────────
 
 def show_login_panel():
@@ -365,7 +393,15 @@ with gr.Blocks(title="TransitFlow") as demo:
 
             gr.Markdown("---")
 
-            gr.Markdown("### 💡 Try these examples")
+            gr.Markdown("### � Analytics Dashboard")
+            analytics_start_date = gr.Textbox(label="Start date", placeholder="YYYY-MM-DD")
+            analytics_end_date = gr.Textbox(label="End date", placeholder="YYYY-MM-DD")
+            analytics_button = gr.Button("Refresh booking analytics", variant="primary", size="sm")
+            analytics_output = gr.Markdown(value="No analytics data loaded yet.")
+
+            gr.Markdown("---")
+
+            gr.Markdown("### �💡 Try these examples")
             for example in EXAMPLES:
                 gr.Button(example, size="sm").click(
                     fn=lambda e=example: e,
@@ -391,6 +427,12 @@ with gr.Blocks(title="TransitFlow") as demo:
         inputs=[msg, chatbot, agent_history_state, debug_toggle, current_user_state],
         outputs=[chatbot, agent_history_state, debug_panel],
     ).then(fn=lambda: "", outputs=msg)
+
+    analytics_button.click(
+        fn=get_booking_analytics,
+        inputs=[analytics_start_date, analytics_end_date],
+        outputs=[analytics_output],
+    )
 
     clear_btn.click(
         fn=clear_conversation,

@@ -46,7 +46,7 @@ def _get_pool():
     """
     global _PG_POOL
     if _PG_POOL is None:
-        # 初始化連線池 (最小連線數 1，最大連線數 20)
+        # Initialize the connection pool (min 1 connection, max 20 connections).
         _PG_POOL = psycopg2.pool.SimpleConnectionPool(1, 20, PG_DSN)
     return _PG_POOL
 
