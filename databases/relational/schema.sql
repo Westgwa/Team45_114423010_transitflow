@@ -334,7 +334,7 @@ CREATE INDEX IF NOT EXISTS idx_feedback_booking
 ON feedback (booking_id);
 
 -- ============================================================
--- [優化] 針對 Metro schedules 的 JSONB 欄位建立 GIN 索引
+-- [Optimization] Create GIN indexes for JSONB columns in `metro_schedules`
 -- ============================================================
 
 CREATE INDEX IF NOT EXISTS idx_metro_schedules_stops_gin
@@ -348,7 +348,7 @@ ON metro_schedules USING GIN (travel_time_from_origin_min);
 
 
 -- ============================================================
--- [優化] 針對 National rail schedules 的 JSONB 欄位建立 GIN 索引
+-- [Optimization] Create GIN indexes for JSONB columns in `national_rail_schedules`
 -- ============================================================
 
 CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_stops_gin
