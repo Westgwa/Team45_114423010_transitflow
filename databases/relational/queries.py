@@ -720,6 +720,94 @@ def query_trip_history(user_email: str, limit: int = 20) -> dict:
             }
 
 
+def query_route_visualization(origin_station: str, destination_station: str, route_type: str = "national_rail") -> dict:
+    """
+    # TASK 6 EXTENSION:
+    Retrieve detailed route information for visualization.
+    
+    This function queries either national rail or metro routes between two stations,
+    including all intermediate stops, travel times, and fare information.
+    Useful for displaying an interactive route map or timeline in the UI.
+    
+    Args:
+        origin_station: Starting station ID (e.g., "NR01")
+        destination_station: Ending station ID (e.g., "NR05")
+        route_type: Either "national_rail" or "metro"
+    
+    Returns:
+        dict containing:
+            - "routes": list of matching routes with stops and timing
+            - "origin": origin station ID
+            - "destination": destination station ID
+            - "count": number of routes found
+    """
+    if route_type not in ["national_rail", "metro"]:
+        return {"error": "Invalid route_type. Must be 'national_rail' or 'metro'.", "routes": []}
+
+    table_name = "national_rail_schedules" if route_type == "national_rail" else "metro_schedules"
+
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if not _table_exists(cur, table_name):
+                return {"error": f"Table {table_name} not found.", "routes": []}
+
+            # Query routes between two stations.
+            # Include all metadata for visualization (stops, times, fares).
+            cur.execute(
+                f"""
+                SELECT
+                    schedule_id,
+                    line,
+                    service_type,
+                    direction,
+                    origin_station_id,
+                    destination_station_id,
+                    stops_in_order,
+                    travel_time_from_origin_min,
+                    first_train_time,
+                    last_train_time,
+                    frequency_min,
+                    fare_classes
+                FROM {table_name}
+                WHERE origin_station_id = %s AND destination_station_id = %s
+                ORDER BY line, service_type
+                """,
+                (origin_station, destination_station),
+            )
+
+            routes = []
+            for row in cur.fetchall():
+                route_dict = dict(row)
+                
+                # Parse JSON fields for easier visualization
+                stops = route_dict.get("stops_in_order", [])
+                times = route_dict.get("travel_time_from_origin_min", {})
+                fares = route_dict.get("fare_classes", {})
+                
+                # Build a route summary with stop details
+                route_dict["stops_detail"] = [
+                    {
+                        "station_id": station_id,
+                        "position": idx,
+                        "travel_time_min": times.get(station_id, 0) if isinstance(times, dict) else 0,
+                    }
+                    for idx, station_id in enumerate(stops)
+                ]
+                
+                # Include fare information summary
+                route_dict["fare_summary"] = fares if isinstance(fares, dict) else {}
+                
+                routes.append(route_dict)
+
+            return {
+                "origin": origin_station,
+                "destination": destination_station,
+                "route_type": route_type,
+                "count": len(routes),
+                "routes": routes,
+            }
+
+
 def query_payment_info(booking_id: str) -> Optional[dict]:
     """
     Return payment information if a payments table exists.

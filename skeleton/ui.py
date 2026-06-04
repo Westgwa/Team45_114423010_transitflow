@@ -24,6 +24,7 @@ from databases.relational.queries import (
     update_password,
     query_booking_revenue_summary,
     query_trip_history,
+    query_route_visualization,
 )
 
 SECRET_QUESTIONS = [
@@ -305,6 +306,68 @@ def render_trip_history(user_email: str) -> str:
     return "\n".join(lines)
 
 
+def render_route_visualization(origin: str, destination: str, route_type: str) -> str:
+    """
+    # TASK 6 EXTENSION:
+    Format route information into a visual markdown display.
+    """
+    if not origin or not destination:
+        return "Please enter both origin and destination station IDs."
+
+    route_data = query_route_visualization(origin.strip(), destination.strip(), route_type)
+
+    if "error" in route_data:
+        return f"Error: {route_data.get('error')}"
+
+    routes = route_data.get("routes", [])
+    if not routes:
+        return f"No routes found from {origin} to {destination}."
+
+    lines = [
+        f"## Route Visualization: {origin} → {destination}",
+        "",
+        f"**Type:** {route_type.replace('_', ' ').title()}  ",
+        f"**Total Routes Found:** {route_data.get('count', 0)}",
+        "",
+    ]
+
+    for idx, route in enumerate(routes, 1):
+        lines.append(f"### Route {idx}: Line {route.get('line', '—')}")
+        lines.append(f"- **Service Type:** {route.get('service_type', '—')}")
+        lines.append(f"- **Direction:** {route.get('direction', '—')}")
+        lines.append(f"- **Schedule ID:** {route.get('schedule_id', '—')}")
+        lines.append(f"- **First Train:** {route.get('first_train_time', '—')}")
+        lines.append(f"- **Last Train:** {route.get('last_train_time', '—')}")
+        lines.append(f"- **Frequency:** Every {route.get('frequency_min', '—')} minutes")
+        lines.append("")
+
+        # Display stops timeline
+        stops_detail = route.get("stops_detail", [])
+        if stops_detail:
+            lines.append("**Route Stops:**")
+            lines.append("")
+            for stop in stops_detail:
+                station_id = stop.get("station_id", "—")
+                travel_time = stop.get("travel_time_min", 0)
+                lines.append(f"- **{station_id}** (arrival: {travel_time} min from origin)")
+
+            lines.append("")
+
+        # Display fare classes
+        fare_summary = route.get("fare_summary", {})
+        if fare_summary:
+            lines.append("**Fare Classes:**")
+            lines.append("")
+            for fare_class, pricing in fare_summary.items():
+                if isinstance(pricing, dict):
+                    base = pricing.get("base_fare_usd", 0)
+                    per_stop = pricing.get("per_stop_rate_usd", 0)
+                    lines.append(f"- **{fare_class}:** ${base} base + ${per_stop} per stop")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
 # ── Panel visibility toggles ──────────────────────────────────────────────────
 
 def show_login_panel():
@@ -444,6 +507,18 @@ with gr.Blocks(title="TransitFlow") as demo:
             trip_history_output = gr.Markdown(value="Log in to view your trips.")
 
             gr.Markdown("---")
+            gr.Markdown("### 🗺️ Route Visualizer")
+            route_origin = gr.Textbox(label="Origin Station ID", placeholder="e.g., NR01 or MS01")
+            route_destination = gr.Textbox(label="Destination Station ID", placeholder="e.g., NR05 or MS10")
+            route_type_dropdown = gr.Dropdown(
+                choices=["national_rail", "metro"],
+                value="national_rail",
+                label="Route Type",
+            )
+            route_visualize_button = gr.Button("Visualize Route", variant="primary", size="sm")
+            route_output = gr.Markdown(value="Enter stations and select route type to visualize.")
+
+            gr.Markdown("---")
             gr.Markdown("### �💡 Try these examples")
             for example in EXAMPLES:
                 gr.Button(example, size="sm").click(
@@ -481,6 +556,12 @@ with gr.Blocks(title="TransitFlow") as demo:
         fn=render_trip_history,
         inputs=[current_user_state],
         outputs=[trip_history_output],
+    )
+
+    route_visualize_button.click(
+        fn=render_route_visualization,
+        inputs=[route_origin, route_destination, route_type_dropdown],
+        outputs=[route_output],
     )
 
     clear_btn.click(

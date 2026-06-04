@@ -20,6 +20,11 @@ This extension is intentionally database-focused, because database extensions ar
   - Queries `bookings` joined with `national_rail_schedules`
   - Includes station names, dates, fares, refund status, and booking IDs
 
+- Added `query_route_visualization(origin_station: str, destination_station: str, route_type: str) -> dict`
+  - Returns detailed route information for route planning
+  - Queries `national_rail_schedules` or `metro_schedules` with stop details
+  - Includes stops in order, travel times, and fare classes
+
 **UI Layer:**
 - Added analytics dashboard panel in sidebar:
   - Date range inputs and refresh button
@@ -31,8 +36,21 @@ This extension is intentionally database-focused, because database extensions ar
     - Booking ID, Origin, Destination, Date, Fare Class, Amount, Status
   - Surfaces personal trip data that chat interface cannot show
 
+- Added route visualizer panel in sidebar:
+  - Origin and destination station ID inputs
+  - Route type dropdown (national_rail or metro)
+  - "Visualize Route" button
+  - Displays route information including:
+    - Line number, service type, direction, schedule ID
+    - First/last train times and frequency
+    - All stops with travel times from origin
+    - Fare classes with pricing details
+
 - Added `render_trip_history(user_email: str) -> str`
   - Formats trip history into a markdown table for display
+
+- Added `render_route_visualization(origin: str, destination: str, route_type: str) -> str`
+  - Formats route details into a markdown display with visual hierarchy
 
 - Added documentation files:
   - `TASK6.md` listing all modified files and functions for the bonus requirement.
@@ -52,6 +70,13 @@ This extension is intentionally database-focused, because database extensions ar
 - `query_trip_history(user_email='bob@example.com', limit=5)`
   - Returns Bob's 5 most recent trips
 
+**Route Visualization (Route Planning):**
+- `query_route_visualization('NR01', 'NR05', 'national_rail')`
+  - Returns all national rail routes between station NR01 and NR05
+  - Shows stops in order with travel times and fare classes
+- `query_route_visualization('MS01', 'MS10', 'metro')`
+  - Returns all metro routes between station MS01 and MS10
+
 The returned data can be used directly by dashboards or by the AI agent to support questions such as:
 
 **Operational questions:**
@@ -63,6 +88,11 @@ The returned data can be used directly by dashboards or by the AI agent to suppo
 - "Show me my recent trips"
 - "When was my last booking?"
 - "How much have I spent on rail bookings?"
+
+**Route planning questions:**
+- "What routes are available from NR01 to NR05?"
+- "Show me metro routes to station MS10"
+- "What are the fare classes for the NR01-NR05 route?"
 
 ### 7.4 Testing Evidence
 
