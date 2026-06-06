@@ -28,4 +28,4 @@ for api_version in ["v1beta", "v1"]:
             if any("embedContent" in a for a in actions):
                 print(f"  EMBED: {m.name}")
     except Exception as e:
-        print(f"  Error: {e}")12
+        print(f"  Error: {e}")
