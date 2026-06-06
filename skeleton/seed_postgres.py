@@ -589,7 +589,20 @@ def seed_payments(cur):
     data = load("payments.json")
     rows = []
 
+    # payments.booking_id has a FK to bookings(booking_id). The mock data also
+    # contains payments tied to metro trips (e.g. MT001) which are not bookings
+    # and have no parent row, so skip any payment whose booking_id is not a
+    # known booking to avoid a foreign-key violation.
+    cur.execute("SELECT booking_id FROM bookings;")
+    valid_booking_ids = {row[0] for row in cur.fetchall()}
+
+    skipped = 0
     for index, item in enumerate(data, start=1):
+        booking_id = item.get("booking_id")
+        if booking_id is not None and booking_id not in valid_booking_ids:
+            skipped += 1
+            continue
+
         payment_id = get_any(
             item,
             ["payment_id", "id"],
@@ -599,7 +612,7 @@ def seed_payments(cur):
         rows.append(
             (
                 payment_id,
-                item.get("booking_id"),
+                booking_id,
                 item.get("user_id"),
                 get_any(item, ["amount_usd", "amount", "price_paid_usd"], 0.0),
                 get_any(item, ["payment_method", "method"], "card"),
@@ -625,7 +638,8 @@ def seed_payments(cur):
         rows,
     )
 
-    print(f"  payments: {inserted} rows inserted / {len(rows)} prepared")
+    suffix = f" ({skipped} skipped: no matching booking)" if skipped else ""
+    print(f"  payments: {inserted} rows inserted / {len(rows)} prepared{suffix}")
 
 
 def seed_feedback(cur):
@@ -636,7 +650,19 @@ def seed_feedback(cur):
     data = load("feedback.json")
     rows = []
 
+    # feedback.booking_id has a FK to bookings(booking_id). Mock data also
+    # references metro trips (e.g. MT001) which are not bookings, so skip any
+    # feedback whose booking_id is not a known booking to avoid a FK violation.
+    cur.execute("SELECT booking_id FROM bookings;")
+    valid_booking_ids = {row[0] for row in cur.fetchall()}
+
+    skipped = 0
     for index, item in enumerate(data, start=1):
+        booking_id = item.get("booking_id")
+        if booking_id is not None and booking_id not in valid_booking_ids:
+            skipped += 1
+            continue
+
         feedback_id = get_any(
             item,
             ["feedback_id", "id"],
@@ -647,7 +673,7 @@ def seed_feedback(cur):
             (
                 feedback_id,
                 item.get("user_id"),
-                item.get("booking_id"),
+                booking_id,
                 get_any(item, ["rating", "score"], None),
                 get_any(item, ["comment", "feedback", "message"], None),
                 get_any(item, ["created_at", "submitted_at", "timestamp"], None),
@@ -668,7 +694,8 @@ def seed_feedback(cur):
         rows,
     )
 
-    print(f"  feedback: {inserted} rows inserted / {len(rows)} prepared")
+    suffix = f" ({skipped} skipped: no matching booking)" if skipped else ""
+    print(f"  feedback: {inserted} rows inserted / {len(rows)} prepared{suffix}")
 
 
 def print_table_counts(cur):
