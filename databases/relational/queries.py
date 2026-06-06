@@ -1,7 +1,7 @@
 """
-TransitFlow — PostgreSQL / Relational Database Layer
+TransitFlow — PostgreSQL / Relational Database Layer (Optimized)
 =====================================================
-This module handles all queries to PostgreSQL.
+This module handles all queries to PostgreSQL with Connection Pooling.
 
 Roles:
 1. Relational database:
@@ -24,23 +24,60 @@ import random
 import string
 from datetime import datetime, timezone
 from typing import Optional
+from contextlib import contextmanager
 
 import psycopg2
 import psycopg2.extras
+from psycopg2 import pool
 
 from skeleton.config import PG_DSN, VECTOR_TOP_K, VECTOR_SIMILARITY_THRESHOLD
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Basic helpers
+# Optimization 1: Global Connection Pool and safe borrow/return mechanism
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _connect():
-    """Return a new psycopg2 connection with autocommit enabled."""
-    conn = psycopg2.connect(PG_DSN)
-    conn.autocommit = True
-    return conn
+_PG_POOL = None
 
+def _get_pool():
+    """Lazily initialize the connection pool so it is created only when needed,
+    avoiding connection spikes during application startup.
+    """
+    global _PG_POOL
+    if _PG_POOL is None:
+        # 初始化連線池 (最小連線數 1，最大連線數 20)
+        _PG_POOL = psycopg2.pool.SimpleConnectionPool(1, 20, PG_DSN)
+    return _PG_POOL
+
+def close_pool():
+    """Provide an interface for the application to close (e.g. on FastAPI shutdown)
+    and release the connection pool resources.
+    """
+    global _PG_POOL
+    if _PG_POOL is not None:
+        _PG_POOL.closeall()
+        _PG_POOL = None
+
+@contextmanager
+def get_db_connection():
+    """Optimization 2: Safe connection borrow/return mechanism (Context Manager).
+    Replaces the previous `_connect()` function which created a new connection
+    on every call.
+    """
+    pool_instance = _get_pool()
+    conn = pool_instance.getconn()
+    conn.autocommit = True
+    try:
+        yield conn
+    finally:
+        # Ensure the connection is returned to the pool whether the query
+        # succeeds or an exception occurs.
+        pool_instance.putconn(conn)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Basic helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _gen_booking_id() -> str:
     suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
@@ -158,7 +195,7 @@ def _ensure_user_auth_columns(cur):
 
 def example_query() -> dict:
     """Example: returns the name of the connected database."""
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT current_database() AS db;")
             return dict(cur.fetchone())
@@ -180,7 +217,7 @@ def query_national_rail_availability(
     origin_id = origin_id.upper()
     destination_id = destination_id.upper()
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if not _table_exists(cur, "national_rail_schedules"):
                 return [{"error": "national_rail_schedules table does not exist."}]
@@ -277,7 +314,7 @@ def query_national_rail_fare(
     fare_class = (fare_class or "standard").lower()
     stops_travelled = int(stops_travelled or 1)
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if not _table_exists(cur, "national_rail_schedules"):
                 return {"error": "national_rail_schedules table does not exist."}
@@ -337,7 +374,7 @@ def query_metro_schedules(origin_id: str, destination_id: str) -> list[dict]:
     origin_id = origin_id.upper()
     destination_id = destination_id.upper()
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if not _table_exists(cur, "metro_schedules"):
                 return []
@@ -393,7 +430,7 @@ def query_metro_fare(schedule_id: str, stops_travelled: int = 1) -> dict:
     """
     stops_travelled = int(stops_travelled or 1)
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if not _table_exists(cur, "metro_schedules"):
                 return {"error": "metro_schedules table does not exist."}
@@ -440,7 +477,7 @@ def query_available_seats(
     """
     fare_class = (fare_class or "standard").lower()
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if not _table_exists(cur, "seat_layouts"):
                 return [{"error": "seat_layouts table does not exist."}]
@@ -491,7 +528,7 @@ def query_user_profile(email: str) -> Optional[dict]:
     if not email:
         return None
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if not _table_exists(cur, "users"):
                 return None
@@ -537,7 +574,7 @@ def query_user_bookings(user_email: str) -> list[dict]:
 
     user_id = profile["user_id"]
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if not _table_exists(cur, "bookings"):
                 return []
@@ -565,7 +602,7 @@ def query_payment_info(booking_id: str) -> Optional[dict]:
     Return payment information if a payments table exists.
     Otherwise return minimal payment-like info from bookings.
     """
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if _table_exists(cur, "payments"):
                 cur.execute(
@@ -622,7 +659,7 @@ def execute_booking(
     ticket_type = ticket_type or "single"
 
     try:
-        with _connect() as conn:
+        with get_db_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 if not _table_exists(cur, "bookings"):
                     return False, "bookings table does not exist."
@@ -764,7 +801,7 @@ def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | st
     Cancel a national rail booking owned by the given user.
     """
     try:
-        with _connect() as conn:
+        with get_db_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 if not _table_exists(cur, "bookings"):
                     return False, "bookings table does not exist."
@@ -861,7 +898,7 @@ def register_user(
         full_name = email
 
     try:
-        with _connect() as conn:
+        with get_db_connection() as conn:
             with conn.cursor() as cur:
                 _ensure_user_auth_columns(cur)
 
@@ -936,7 +973,7 @@ def login_user(email: str, password: str) -> Optional[dict]:
     if not email or not password:
         return None
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             _ensure_user_auth_columns(cur)
 
@@ -978,7 +1015,7 @@ def get_user_secret_question(email: str) -> Optional[str]:
     if not email:
         return None
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor() as cur:
             _ensure_user_auth_columns(cur)
 
@@ -1003,7 +1040,7 @@ def verify_secret_answer(email: str, answer: str) -> bool:
     if not email or not answer:
         return False
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor() as cur:
             _ensure_user_auth_columns(cur)
 
@@ -1031,7 +1068,7 @@ def update_password(email: str, new_password: str) -> bool:
     if not email or not new_password:
         return False
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor() as cur:
             _ensure_user_auth_columns(cur)
 
@@ -1072,7 +1109,7 @@ def query_policy_vector_search(
 
     vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 sql,
@@ -1101,7 +1138,7 @@ def store_policy_document(
     """
     vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
 
-    with _connect() as conn:
+    with get_db_connection() as conn:
         with conn.cursor() as cur:
             if not _column_exists(cur, "policy_documents", "source_file"):
                 cur.execute(

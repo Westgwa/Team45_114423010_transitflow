@@ -333,6 +333,38 @@ ON feedback (user_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_booking
 ON feedback (booking_id);
 
+-- ============================================================
+-- [Optimization] Create GIN indexes for JSONB columns in `metro_schedules`
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_metro_schedules_stops_gin
+ON metro_schedules USING GIN (stops_in_order);
+
+CREATE INDEX IF NOT EXISTS idx_metro_schedules_operates_on_gin
+ON metro_schedules USING GIN (operates_on);
+
+CREATE INDEX IF NOT EXISTS idx_metro_schedules_travel_time_gin
+ON metro_schedules USING GIN (travel_time_from_origin_min);
+
+
+-- ============================================================
+-- [Optimization] Create GIN indexes for JSONB columns in `national_rail_schedules`
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_stops_gin
+ON national_rail_schedules USING GIN (stops_in_order);
+
+CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_passed_gin
+ON national_rail_schedules USING GIN (passed_through_stations);
+
+CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_operates_on_gin
+ON national_rail_schedules USING GIN (operates_on);
+
+CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_travel_time_gin
+ON national_rail_schedules USING GIN (travel_time_from_origin_min);
+
+CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_fare_classes_gin
+ON national_rail_schedules USING GIN (fare_classes);
 
 -- ============================================================
 -- Schema ready
