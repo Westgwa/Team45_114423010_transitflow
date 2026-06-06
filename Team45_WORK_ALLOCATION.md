@@ -54,10 +54,10 @@ No changes.
 
 ## 5. Team Declaration
 
-We declare that the above allocation truthfully reflects each member's contribution.
+We confirm that this work allocation accurately reflects how responsibilities were divided within our team.
 
-| Name | Signature | Date |
-|------|-----------|------|
-| 郭明儒 | <請簽名> | 2026-06-07 |
-| 卓少筠 | <請簽名> | 2026-06-07 |
-| 林楷崋 | <請簽名> | 2026-06-07 |
+| Name | Signature / Typed name | Date |
+|------|------------------------|------|
+| 郭明儒 | 郭明儒 | 2026-06-07 |
+| 卓少筠 | 卓少筠 | 2026-06-07 |
+| 林楷崋 | 林楷崋 | 2026-06-07 |

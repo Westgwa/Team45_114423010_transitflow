@@ -177,6 +177,16 @@ def section_b():
         return isinstance(rows, list) and len(rows) > 0, f"{len(rows)} schedules"
     check("B1: availability returns non-empty list", _b1)
 
+    def _b1_seats():
+        rows = rq.query_national_rail_availability("NR01", "NR05", "2026-08-01")
+        ok = all(
+            "schedule_id" in r
+            and isinstance(r.get("available_seats"), int)
+            for r in rows
+        )
+        return ok and len(rows) > 0, f"available_seats={[r.get('available_seats') for r in rows]}"
+    check("B1: each result has schedule_id + numeric available_seats", _b1_seats)
+
     def _b1_empty():
         rows = rq.query_national_rail_availability("NR05", "NR01_NOPE")
         return rows == [], f"{rows!r}"
@@ -216,6 +226,17 @@ def section_b():
     def _b6():
         return rq.query_user_profile("nobody@example.com") is None, "None"
     check("B6: unknown email returns None", _b6)
+
+    def _b6_known():
+        profile = rq.query_user_profile(_any_user_email())
+        ok = (
+            isinstance(profile, dict)
+            and "email" in profile
+            and ("full_name" in profile or "name" in profile)
+            and isinstance(profile.get("year_of_birth"), int)
+        )
+        return ok, f"year_of_birth={profile.get('year_of_birth') if profile else None}"
+    check("B6: known email returns dict with email/name/year_of_birth", _b6_known)
 
     def _b7():
         result = rq.query_user_bookings(_any_user_email())
@@ -286,6 +307,26 @@ def section_c():
         )
         return ok, f"{len(ripple)} affected stations"
     check("C5: delay ripple includes hops_away", _c5)
+
+    def _c5_zero():
+        ripple = gq.query_delay_ripple("MS01", hops=0)
+        ok = (
+            isinstance(ripple, list) and len(ripple) == 1
+            and ripple[0]["station_id"] == "MS01"
+            and ripple[0]["hops_away"] == 0
+        )
+        return ok, f"{ripple!r}"[:120]
+    check("C5: hops=0 returns only the delayed station itself", _c5_zero)
+
+    def _c34_path_shape():
+        routes = gq.query_alternative_routes("NR01", "NR05", "NR03", max_routes=2)
+        inter = gq.query_interchange_path("MS20", "NR05")
+        ok = (
+            all(isinstance(rt.get("path"), list) for rt in routes)
+            and isinstance(inter.get("path"), list)
+        )
+        return ok, "path key present on alternative routes + interchange path"
+    check("C3/C4: routing results expose a path list", _c34_path_shape)
 
     def _c6():
         conns = gq.query_station_connections("MS01")

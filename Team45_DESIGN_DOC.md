@@ -130,7 +130,7 @@ The earlier design stored the ordered stops directly inside each schedule row as
 The new design extracts a junction relation `metro_schedule_stops(schedule_id, station_id, stop_order, travel_time_from_origin_min)` (and the rail twin `national_rail_schedule_stops`). It is in 3NF:
 
 - **Composite primary key `(schedule_id, stop_order)`.** Every non-key attribute (`station_id`, `travel_time_from_origin_min`) is functionally dependent on the *whole* key and on nothing but the key — there are no partial dependencies (2NF) and no transitive dependencies through a non-key attribute (3NF).
-- **`UNIQUE (schedule_id, station_id)`** forbids a schedule from listing the same station twice.
+- **`UNIQUE (schedule_id, station_id)`** forbids a schedule from listing the same station twice. This pair is in fact a second *candidate key* of the relation — either composite could serve as the primary key; we chose `(schedule_id, stop_order)` as the primary key because ordered traversal is the dominant access pattern, and enforce the other candidate key with the UNIQUE constraint.
 - **Foreign keys with deliberate delete rules:** `schedule_id` references the schedule with `ON DELETE CASCADE` (stops are meaningless without their schedule), and `station_id` references the station table with `ON DELETE RESTRICT` (a station that is still part of a route cannot be silently removed). A supporting index on `station_id` backs reverse look-ups.
 
 The change is visible in the query shape. Availability between an origin and a destination is now a single set-based self-join over the junction table, with the ordering enforced by `stop_order`:
@@ -221,6 +221,8 @@ The `min(length(p))` keeps the shortest distance when a station is reachable by 
 **Fare-class routing.** The cheapest-route query (`query_cheapest_route`) reuses the same Dijkstra call but swaps the *weight property* from a small whitelist: `weight_property = "fare_first" if fare_class == "first" else "fare_standard"`. Because first class costs more per minute on rail (`0.60` vs `0.35`), a first-class request can return a different total — and sometimes a different path — than a standard request over the identical topology. The whitelist is what keeps the property swap injection-safe.
 
 ## Section 4 — Vector / RAG Design
+
+**What is embedded, and why cosine similarity.** The 13 policy documents (refund policy, ticket types, booking rules, travel policies) are embedded because they are the free-text knowledge the assistant must quote accurately — unlike schedules or fares, they cannot be answered from relational rows. Cosine similarity is the right metric for this search because it is *magnitude-independent*: it compares only the **direction** of two vectors (`cos θ = A·B / |A||B|`), not their length. Embedding magnitude varies with document length and token statistics, so two texts about the same topic — a one-line user question and a full policy paragraph — still score as highly similar when their vectors point the same way. A magnitude-sensitive metric such as raw Euclidean distance would systematically penalise short queries against long documents.
 
 **RAG pipeline (numbered).**
 
