@@ -16,12 +16,14 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- policy_documents uses SERIAL because RAG chunks have no
 -- natural identifier and are only referenced internally.
 --
--- Deletion strategy (consistent across all FKs):
---   * reference/parent data (stations, schedules, seats)
---       -> ON DELETE RESTRICT  (never silently lose journeys)
+-- Deletion strategy (rule = how much the child depends on the parent):
 --   * dependent detail rows (credentials, schedule stops, payments)
 --       -> ON DELETE CASCADE   (meaningless without their parent)
---   * optional audit links (bookings.user_id, feedback.*)
+--   * hard operational references (bookings -> schedule/seat,
+--     schedules -> stations)
+--       -> ON DELETE RESTRICT  (never silently lose a sold journey)
+--   * soft audit/history links (bookings.user_id, metro_trips.*,
+--     feedback.*)
 --       -> ON DELETE SET NULL  (keep the financial/audit record)
 -- ============================================================
 
