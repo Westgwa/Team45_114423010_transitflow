@@ -5,8 +5,8 @@
 | Full Name | Student ID | GitHub Username | Email |
 |-----------|------------|-----------------|-------|
 | 郭明儒 (Team Leader) | 114423010 | Westgwa | asd0804445@gmail.com |
-| 卓少筠 | 113403005 | <待填> | <待填> |
-| 林楷崋 | 113403018 | <待填> | <待填> |
+| 卓少筠 | 113403005 | carol941228 | newcarol941228@gmail.com |
+| 林楷崋 | 113403018 | tsczta | kaihualin94@gmail.com |
 
 ## 2. Task Ownership
 

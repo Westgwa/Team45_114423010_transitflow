@@ -14,7 +14,7 @@
 
 - [x] `Team45_DESIGN_DOC.md` — 已改名、Team 45 與成員資訊已填
 - [x] `Team45_WORK_ALLOCATION.md` — 已改名、分工 / 貢獻百分比(60/20/20,加總 100%)已填
-- [ ] 補填分工表中卓少筠、林楷崋的 **GitHub Username 與 Email**(僅剩這 4 格 `<待填>`)
+- [x] 卓少筠、林楷崋的 GitHub Username 與 Email 已填
 - [ ] 三位成員在分工表 Team Declaration 簽名(`<請簽名>`)
 
 ## 個人提交(每人各自)
