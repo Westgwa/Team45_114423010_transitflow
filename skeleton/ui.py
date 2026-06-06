@@ -7,6 +7,8 @@ Then open: http://localhost:7860
 Students: You do NOT need to change this file.
 """
 
+# TASK 6 EXTENSION: Added an analytics dashboard panel to surface booking revenue data.
+
 import sys
 sys.path.insert(0, ".")
 
@@ -20,6 +22,9 @@ from databases.relational.queries import (
     get_user_secret_question,
     verify_secret_answer,
     update_password,
+    query_booking_revenue_summary,
+    query_trip_history,
+    query_route_visualization,
 )
 
 SECRET_QUESTIONS = [
@@ -238,6 +243,131 @@ def forgot_reset_password(email: str, answer: str, new_password: str):
     return gr.update(value="**Password reset successfully. You can now log in.**", visible=True)
 
 
+def render_booking_summary(summary: dict) -> str:
+    """Convert booking summary metrics into a markdown-friendly string."""
+    if not summary:
+        return "No analytics data available."
+
+    return "\n".join([
+        f"**Booking Analytics Dashboard**",
+        f"- Total bookings: **{summary.get('total_bookings', 0)}**",
+        f"- Active bookings: **{summary.get('active_bookings', 0)}**",
+        f"- Cancelled bookings: **{summary.get('cancelled_bookings', 0)}**",
+        f"- Total revenue (USD): **${summary.get('total_revenue_usd', 0):,.2f}**",
+        f"- Total refunds (USD): **${summary.get('total_refunds_usd', 0):,.2f}**",
+        f"- Date range: **{summary.get('start_date') or 'all'}** to **{summary.get('end_date') or 'all'}**",
+    ])
+
+
+def get_booking_analytics(start_date: str, end_date: str):
+    """Fetch booking analytics summary for the given date range."""
+    summary = query_booking_revenue_summary(
+        start_date=start_date.strip() or None,
+        end_date=end_date.strip() or None,
+    )
+    return render_booking_summary(summary)
+
+
+def render_trip_history(user_email: str) -> str:
+    """Format trip history into a markdown-friendly display."""
+    if not user_email:
+        return "Please log in to view your trip history."
+
+    history = query_trip_history(user_email, limit=10)
+
+    if "error" in history:
+        return f"Error: {history.get('error')}"
+
+    trips = history.get("trips", [])
+    if not trips:
+        return "No trips found in your history."
+
+    # Build a markdown table of trips
+    lines = [
+        "## Your Trip History",
+        "",
+        "| Booking ID | From | To | Date | Fare Class | Amount | Status |",
+        "|---|---|---|---|---|---|---|",
+    ]
+
+    for trip in trips:
+        booking_id = trip.get("booking_id", "—")
+        origin = trip.get("origin_station_id", "—")
+        destination = trip.get("destination_station_id", "—")
+        travel_date = trip.get("travel_date", "—")
+        fare_class = trip.get("fare_class", "standard")
+        price = f"${trip.get('price_paid_usd', 0):.2f}"
+        status = trip.get("status", "unknown").capitalize()
+
+        lines.append(
+            f"| {booking_id} | {origin} | {destination} | {travel_date} | {fare_class} | {price} | {status} |"
+        )
+
+    return "\n".join(lines)
+
+
+def render_route_visualization(origin: str, destination: str, route_type: str) -> str:
+    """
+    # TASK 6 EXTENSION:
+    Format route information into a visual markdown display.
+    """
+    if not origin or not destination:
+        return "Please enter both origin and destination station IDs."
+
+    route_data = query_route_visualization(origin.strip(), destination.strip(), route_type)
+
+    if "error" in route_data:
+        return f"Error: {route_data.get('error')}"
+
+    routes = route_data.get("routes", [])
+    if not routes:
+        return f"No routes found from {origin} to {destination}."
+
+    lines = [
+        f"## Route Visualization: {origin} → {destination}",
+        "",
+        f"**Type:** {route_type.replace('_', ' ').title()}  ",
+        f"**Total Routes Found:** {route_data.get('count', 0)}",
+        "",
+    ]
+
+    for idx, route in enumerate(routes, 1):
+        lines.append(f"### Route {idx}: Line {route.get('line', '—')}")
+        lines.append(f"- **Service Type:** {route.get('service_type', '—')}")
+        lines.append(f"- **Direction:** {route.get('direction', '—')}")
+        lines.append(f"- **Schedule ID:** {route.get('schedule_id', '—')}")
+        lines.append(f"- **First Train:** {route.get('first_train_time', '—')}")
+        lines.append(f"- **Last Train:** {route.get('last_train_time', '—')}")
+        lines.append(f"- **Frequency:** Every {route.get('frequency_min', '—')} minutes")
+        lines.append("")
+
+        # Display stops timeline
+        stops_detail = route.get("stops_detail", [])
+        if stops_detail:
+            lines.append("**Route Stops:**")
+            lines.append("")
+            for stop in stops_detail:
+                station_id = stop.get("station_id", "—")
+                travel_time = stop.get("travel_time_min", 0)
+                lines.append(f"- **{station_id}** (arrival: {travel_time} min from origin)")
+
+            lines.append("")
+
+        # Display fare classes
+        fare_summary = route.get("fare_summary", {})
+        if fare_summary:
+            lines.append("**Fare Classes:**")
+            lines.append("")
+            for fare_class, pricing in fare_summary.items():
+                if isinstance(pricing, dict):
+                    base = pricing.get("base_fare_usd", 0)
+                    per_stop = pricing.get("per_stop_rate_usd", 0)
+                    lines.append(f"- **{fare_class}:** ${base} base + ${per_stop} per stop")
+            lines.append("")
+
+    return "\n".join(lines)
+
+
 # ── Panel visibility toggles ──────────────────────────────────────────────────
 
 def show_login_panel():
@@ -365,7 +495,31 @@ with gr.Blocks(title="TransitFlow") as demo:
 
             gr.Markdown("---")
 
-            gr.Markdown("### 💡 Try these examples")
+            gr.Markdown("### � Analytics Dashboard")
+            analytics_start_date = gr.Textbox(label="Start date", placeholder="YYYY-MM-DD")
+            analytics_end_date = gr.Textbox(label="End date", placeholder="YYYY-MM-DD")
+            analytics_button = gr.Button("Refresh booking analytics", variant="primary", size="sm")
+            analytics_output = gr.Markdown(value="No analytics data loaded yet.")
+
+            gr.Markdown("---")
+            gr.Markdown("### 🛫 Trip History")
+            trip_history_button = gr.Button("Load my trip history", variant="primary", size="sm")
+            trip_history_output = gr.Markdown(value="Log in to view your trips.")
+
+            gr.Markdown("---")
+            gr.Markdown("### 🗺️ Route Visualizer")
+            route_origin = gr.Textbox(label="Origin Station ID", placeholder="e.g., NR01 or MS01")
+            route_destination = gr.Textbox(label="Destination Station ID", placeholder="e.g., NR05 or MS10")
+            route_type_dropdown = gr.Dropdown(
+                choices=["national_rail", "metro"],
+                value="national_rail",
+                label="Route Type",
+            )
+            route_visualize_button = gr.Button("Visualize Route", variant="primary", size="sm")
+            route_output = gr.Markdown(value="Enter stations and select route type to visualize.")
+
+            gr.Markdown("---")
+            gr.Markdown("### �💡 Try these examples")
             for example in EXAMPLES:
                 gr.Button(example, size="sm").click(
                     fn=lambda e=example: e,
@@ -391,6 +545,24 @@ with gr.Blocks(title="TransitFlow") as demo:
         inputs=[msg, chatbot, agent_history_state, debug_toggle, current_user_state],
         outputs=[chatbot, agent_history_state, debug_panel],
     ).then(fn=lambda: "", outputs=msg)
+
+    analytics_button.click(
+        fn=get_booking_analytics,
+        inputs=[analytics_start_date, analytics_end_date],
+        outputs=[analytics_output],
+    )
+
+    trip_history_button.click(
+        fn=render_trip_history,
+        inputs=[current_user_state],
+        outputs=[trip_history_output],
+    )
+
+    route_visualize_button.click(
+        fn=render_route_visualization,
+        inputs=[route_origin, route_destination, route_type_dropdown],
+        outputs=[route_output],
+    )
 
     clear_btn.click(
         fn=clear_conversation,

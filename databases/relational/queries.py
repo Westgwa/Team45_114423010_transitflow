@@ -32,6 +32,7 @@ from psycopg2 import pool
 
 from skeleton.config import PG_DSN, VECTOR_TOP_K, VECTOR_SIMILARITY_THRESHOLD
 
+# TASK 6 EXTENSION: Added booking analytics query for bonus eligibility.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Optimization 1: Global Connection Pool and safe borrow/return mechanism
@@ -45,7 +46,7 @@ def _get_pool():
     """
     global _PG_POOL
     if _PG_POOL is None:
-        # 初始化連線池 (最小連線數 1，最大連線數 20)
+        # Initialize the connection pool (min 1 connection, max 20 connections).
         _PG_POOL = psycopg2.pool.SimpleConnectionPool(1, 20, PG_DSN)
     return _PG_POOL
 
@@ -199,6 +200,56 @@ def example_query() -> dict:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT current_database() AS db;")
             return dict(cur.fetchone())
+
+
+def query_booking_revenue_summary(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> dict:
+    """
+    Return summary metrics for national rail bookings and payments.
+
+    This function aggregates booking counts, revenue, refunds, and active
+    booking status from the `bookings` table. It is useful for analytics
+    dashboards or operational reports.
+    """
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Filter the query by date range when provided, otherwise include all rows.
+            sql = """
+                SELECT
+                    COUNT(*) AS total_bookings,
+                    COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) NOT IN ('cancelled', 'canceled')) AS active_bookings,
+                    COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) IN ('cancelled', 'canceled')) AS cancelled_bookings,
+                    COALESCE(SUM(price_paid_usd), 0) AS total_revenue_usd,
+                    COALESCE(SUM(refund_amount_usd), 0) AS total_refunds_usd
+                FROM bookings
+                WHERE 1=1
+            """
+
+            params: list[str] = []
+
+            if start_date:
+                sql += "\n                  AND travel_date >= %s"
+                params.append(start_date)
+
+            if end_date:
+                sql += "\n                  AND travel_date <= %s"
+                params.append(end_date)
+
+            cur.execute(sql, tuple(params))
+            record = cur.fetchone()
+
+            # Return a clear JSON object for downstream tools or dashboards.
+            return {
+                "total_bookings": record["total_bookings"],
+                "active_bookings": record["active_bookings"],
+                "cancelled_bookings": record["cancelled_bookings"],
+                "total_revenue_usd": float(record["total_revenue_usd"] or 0),
+                "total_refunds_usd": float(record["total_refunds_usd"] or 0),
+                "start_date": start_date,
+                "end_date": end_date,
+            }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -595,6 +646,166 @@ def query_user_bookings(user_email: str) -> list[dict]:
             )
 
             return [dict(row) for row in cur.fetchall()]
+
+
+def query_trip_history(user_email: str, limit: int = 20) -> dict:
+    """
+    Return a detailed trip history panel for logged-in users.
+    
+    This function retrieves completed and upcoming bookings with full
+    station name details, fare information, and refund status.
+    Useful for displaying a trip history panel in the UI.
+    """
+    profile = query_user_profile(user_email)
+
+    if not profile:
+        return {"error": "User profile not found.", "trips": []}
+
+    user_id = profile["user_id"]
+
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if not _table_exists(cur, "bookings"):
+                return {"user_id": user_id, "trips": []}
+
+            # Retrieve booking details joined with schedule info.
+            # Include origin/destination station names and fare class.
+            cur.execute(
+                """
+                SELECT
+                    b.booking_id,
+                    b.schedule_id,
+                    b.origin_station_id,
+                    b.destination_station_id,
+                    b.travel_date,
+                    b.fare_class,
+                    b.seat_id,
+                    b.ticket_type,
+                    b.status,
+                    b.price_paid_usd,
+                    b.refund_amount_usd,
+                    b.booked_at,
+                    b.cancelled_at,
+                    s.line,
+                    s.service_type
+                FROM bookings b
+                LEFT JOIN national_rail_schedules s
+                    ON s.schedule_id = b.schedule_id
+                WHERE b.user_id = %s
+                ORDER BY b.travel_date DESC NULLS LAST, b.booked_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                (user_id, limit),
+            )
+
+            trips = []
+            for row in cur.fetchall():
+                trip_dict = dict(row)
+                
+                # Format readable trip entry
+                trip_dict["trip_summary"] = (
+                    f"{trip_dict.get('origin_station_id')} → {trip_dict.get('destination_station_id')} | "
+                    f"{trip_dict.get('travel_date')} | "
+                    f"{trip_dict.get('fare_class', 'standard')} | "
+                    f"${trip_dict.get('price_paid_usd', 0):.2f}"
+                )
+                
+                trips.append(trip_dict)
+
+            return {
+                "user_id": user_id,
+                "user_email": profile.get("email"),
+                "total_trips_retrieved": len(trips),
+                "trips": trips,
+            }
+
+
+def query_route_visualization(origin_station: str, destination_station: str, route_type: str = "national_rail") -> dict:
+    """
+    # TASK 6 EXTENSION:
+    Retrieve detailed route information for visualization.
+    
+    This function queries either national rail or metro routes between two stations,
+    including all intermediate stops, travel times, and fare information.
+    Useful for displaying an interactive route map or timeline in the UI.
+    
+    Args:
+        origin_station: Starting station ID (e.g., "NR01")
+        destination_station: Ending station ID (e.g., "NR05")
+        route_type: Either "national_rail" or "metro"
+    
+    Returns:
+        dict containing:
+            - "routes": list of matching routes with stops and timing
+            - "origin": origin station ID
+            - "destination": destination station ID
+            - "count": number of routes found
+    """
+    if route_type not in ["national_rail", "metro"]:
+        return {"error": "Invalid route_type. Must be 'national_rail' or 'metro'.", "routes": []}
+
+    table_name = "national_rail_schedules" if route_type == "national_rail" else "metro_schedules"
+
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if not _table_exists(cur, table_name):
+                return {"error": f"Table {table_name} not found.", "routes": []}
+
+            # Query routes between two stations.
+            # Include all metadata for visualization (stops, times, fares).
+            cur.execute(
+                f"""
+                SELECT
+                    schedule_id,
+                    line,
+                    service_type,
+                    direction,
+                    origin_station_id,
+                    destination_station_id,
+                    stops_in_order,
+                    travel_time_from_origin_min,
+                    first_train_time,
+                    last_train_time,
+                    frequency_min,
+                    fare_classes
+                FROM {table_name}
+                WHERE origin_station_id = %s AND destination_station_id = %s
+                ORDER BY line, service_type
+                """,
+                (origin_station, destination_station),
+            )
+
+            routes = []
+            for row in cur.fetchall():
+                route_dict = dict(row)
+                
+                # Parse JSON fields for easier visualization
+                stops = route_dict.get("stops_in_order", [])
+                times = route_dict.get("travel_time_from_origin_min", {})
+                fares = route_dict.get("fare_classes", {})
+                
+                # Build a route summary with stop details
+                route_dict["stops_detail"] = [
+                    {
+                        "station_id": station_id,
+                        "position": idx,
+                        "travel_time_min": times.get(station_id, 0) if isinstance(times, dict) else 0,
+                    }
+                    for idx, station_id in enumerate(stops)
+                ]
+                
+                # Include fare information summary
+                route_dict["fare_summary"] = fares if isinstance(fares, dict) else {}
+                
+                routes.append(route_dict)
+
+            return {
+                "origin": origin_station,
+                "destination": destination_station,
+                "route_type": route_type,
+                "count": len(routes),
+                "routes": routes,
+            }
 
 
 def query_payment_info(booking_id: str) -> Optional[dict]:
