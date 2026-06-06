@@ -76,8 +76,8 @@ def query_shortest_route(origin_id: str, destination_id: str, network: str = "au
     CALL apoc.algo.dijkstra(
         start,                             
         end,                               
-        'CONNECTS_TO>|INTERCHANGES_WITH>', 
-        'travel_time_min'                  
+        'METRO_LINK>|RAIL_LINK>|INTERCHANGE_TO>',
+        'travel_time_min'
     ) YIELD path, weight                   
     
     // [Step 3: Apply external filter conditions]
@@ -118,7 +118,17 @@ def query_shortest_route(origin_id: str, destination_id: str, network: str = "au
         )
 
 
-def query_cheapest_route(origin_id: str, destination_id: str, network: str = "auto") -> dict:
+def query_cheapest_route(
+    origin_id: str,
+    destination_id: str,
+    network: str = "auto",
+    fare_class: str = "standard",
+) -> dict:
+    # Pick the relationship weight property from a fixed whitelist so the
+    # requested fare class changes the cost function (first class costs
+    # more per minute on rail links; metro is flat-fare).
+    fare_class = (fare_class or "standard").lower()
+    weight_property = "fare_first" if fare_class == "first" else "fare_standard"
     network_condition = _network_filter(network)
 
     cypher = f"""
@@ -128,10 +138,10 @@ def query_cheapest_route(origin_id: str, destination_id: str, network: str = "au
     
     // [Step 2: Call core algorithm (weight replaced by fare)]
     CALL apoc.algo.dijkstra(
-        start,                                
-        end,                                  
-        'CONNECTS_TO>|INTERCHANGES_WITH>', 
-        'fare'                                
+        start,
+        end,
+        'METRO_LINK>|RAIL_LINK>|INTERCHANGE_TO>',
+        '{weight_property}'
     ) YIELD path, weight                   
     
     // [Step 3: Apply external network filter conditions]
@@ -151,7 +161,7 @@ def query_cheapest_route(origin_id: str, destination_id: str, network: str = "au
             to: endNode(r).station_id,
             line: r.line,
             network: r.network,
-            fare: coalesce(r.fare, 0),
+            fare: coalesce(r.{weight_property}, r.fare, 0),
             travel_time_min: coalesce(r.travel_time_min, 1)
         }}] AS legs
     """
@@ -164,13 +174,15 @@ def query_cheapest_route(origin_id: str, destination_id: str, network: str = "au
             destination_id=destination_id,
         ).single()
 
-        return _format_route(
+        route = _format_route(
             record=record,
             origin_id=origin_id,
             destination_id=destination_id,
-            value_key="total_fare",       
-            output_key="total_fare_usd",  
+            value_key="total_fare",
+            output_key="total_fare_usd",
         )
+        route["fare_class"] = fare_class
+        return route
 
 
 def query_alternative_routes(
@@ -204,7 +216,7 @@ def query_alternative_routes(
     MATCH (start:Station {station_id: $origin_id})
     MATCH (end:Station {station_id: $destination_id})
 
-    MATCH p = (start)-[:CONNECTS_TO|INTERCHANGES_WITH*1..8]-(end)
+    MATCH p = (start)-[:METRO_LINK|RAIL_LINK|INTERCHANGE_TO*1..8]-(end)
 
     WHERE NONE(n IN nodes(p) WHERE n.station_id IN $avoid_ids)
       AND ALL(n IN nodes(p) WHERE single(m IN nodes(p) WHERE m = n))
@@ -268,8 +280,8 @@ def query_interchange_path(origin_id: str, destination_id: str) -> dict:
     cypher = """
     MATCH (start:Station {station_id: $origin_id})
     MATCH (end:Station {station_id: $destination_id})
-    MATCH p = (start)-[:CONNECTS_TO|INTERCHANGES_WITH*1..20]->(end)
-    WHERE ANY(r IN relationships(p) WHERE type(r) = "INTERCHANGES_WITH")
+    MATCH p = (start)-[:METRO_LINK|RAIL_LINK|INTERCHANGE_TO*1..20]->(end)
+    WHERE ANY(r IN relationships(p) WHERE type(r) = "INTERCHANGE_TO")
     WITH p,
           reduce(total = 0, r IN relationships(p) |
              total + coalesce(r.travel_time_min, 1)
@@ -320,9 +332,13 @@ def query_interchange_path(origin_id: str, destination_id: str) -> dict:
 
 
 def query_delay_ripple(delayed_station_id: str, hops: int = 2) -> list[dict]:
-    cypher = """
-    MATCH (start:Station {station_id: $delayed_station_id})
-    MATCH p = (start)-[:CONNECTS_TO|INTERCHANGES_WITH*1..$hops]-(affected:Station)
+    # Cypher does not allow parameters as variable-length bounds, so the
+    # validated integer is interpolated directly (clamped to a safe range).
+    hops = max(1, min(int(hops), 10))
+
+    cypher = f"""
+    MATCH (start:Station {{station_id: $delayed_station_id}})
+    MATCH p = (start)-[:METRO_LINK|RAIL_LINK|INTERCHANGE_TO*1..{hops}]-(affected:Station)
     WITH affected, min(length(p)) AS hops_away
     RETURN DISTINCT
         affected.station_id AS station_id,
@@ -338,7 +354,6 @@ def query_delay_ripple(delayed_station_id: str, hops: int = 2) -> list[dict]:
         records = session.run(
             cypher,
             delayed_station_id=delayed_station_id,
-            hops=int(hops),
         )
 
         return [
@@ -355,7 +370,7 @@ def query_delay_ripple(delayed_station_id: str, hops: int = 2) -> list[dict]:
 
 def query_station_connections(station_id: str) -> list[dict]:
     cypher = """
-    MATCH (s:Station {station_id: $station_id})-[r:CONNECTS_TO|INTERCHANGES_WITH]->(target:Station)
+    MATCH (s:Station {station_id: $station_id})-[r:METRO_LINK|RAIL_LINK|INTERCHANGE_TO]->(target:Station)
     RETURN
         target.station_id AS station_id,
         target.name AS name,
