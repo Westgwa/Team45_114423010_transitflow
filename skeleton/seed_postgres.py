@@ -116,21 +116,111 @@ def split_full_name(full_name: str) -> tuple[str, str]:
 # ── seeders ──────────────────────────────────────────────────────────────────
 
 def seed_metro_stations(cur):
-    """
-    Metro stations are stored in Neo4j, not PostgreSQL.
-    This function remains as a no-op for dependency order.
-    """
+    if not table_exists(cur, "metro_stations"):
+        print("  metro_stations: table not found, skipped")
+        return
+
     data = load("metro_stations.json")
-    print(f"  metro_stations: skipped relational insert ({len(data)} records used by Neo4j)")
+    rows = []
+
+    for item in data:
+        rows.append(
+            (
+                item["station_id"],
+                item.get("name", item["station_id"]),
+                json_dumps(item.get("lines", [])),
+                item.get("is_interchange_metro", False),
+                item.get("is_interchange_national_rail", False),
+                item.get("interchange_national_rail_station_id"),
+            )
+        )
+
+    inserted = insert_many(
+        cur,
+        "metro_stations",
+        [
+            "station_id",
+            "name",
+            "lines",
+            "is_interchange_metro",
+            "is_interchange_national_rail",
+            "interchange_national_rail_station_id",
+        ],
+        rows,
+    )
+
+    print(f"  metro_stations: {inserted} rows inserted / {len(rows)} prepared")
 
 
 def seed_national_rail_stations(cur):
-    """
-    National rail stations are stored in Neo4j, not PostgreSQL.
-    This function remains as a no-op for dependency order.
-    """
+    if not table_exists(cur, "national_rail_stations"):
+        print("  national_rail_stations: table not found, skipped")
+        return
+
     data = load("national_rail_stations.json")
-    print(f"  national_rail_stations: skipped relational insert ({len(data)} records used by Neo4j)")
+    rows = []
+
+    for item in data:
+        rows.append(
+            (
+                item["station_id"],
+                item.get("name", item["station_id"]),
+                json_dumps(item.get("lines", [])),
+                item.get("is_interchange_national_rail", False),
+                item.get("is_interchange_metro", False),
+                item.get("interchange_metro_station_id"),
+            )
+        )
+
+    inserted = insert_many(
+        cur,
+        "national_rail_stations",
+        [
+            "station_id",
+            "name",
+            "lines",
+            "is_interchange_national_rail",
+            "is_interchange_metro",
+            "interchange_metro_station_id",
+        ],
+        rows,
+    )
+
+    print(f"  national_rail_stations: {inserted} rows inserted / {len(rows)} prepared")
+
+
+def seed_schedule_stops(cur, stops_table: str, data: list[dict]):
+    """
+    Populate a schedule-stops junction table from the mock data's
+    stops_in_order list + travel_time_from_origin_min map.
+    stop_order is the 0-based position in stops_in_order.
+    """
+    if not table_exists(cur, stops_table):
+        print(f"  {stops_table}: table not found, skipped")
+        return
+
+    rows = []
+
+    for item in data:
+        times = item.get("travel_time_from_origin_min") or {}
+        for order, station_id in enumerate(item.get("stops_in_order", [])):
+            rows.append(
+                (
+                    item["schedule_id"],
+                    station_id,
+                    order,
+                    int(times.get(station_id, 0)),
+                )
+            )
+
+    inserted = insert_many(
+        cur,
+        stops_table,
+        ["schedule_id", "station_id", "stop_order", "travel_time_from_origin_min"],
+        rows,
+    )
+
+    print(f"  {stops_table}: {inserted} rows inserted / {len(rows)} prepared")
 
 
 def seed_metro_schedules(cur):
@@ -149,10 +239,8 @@ def seed_metro_schedules(cur):
                 item.get("direction"),
                 item["origin_station_id"],
                 item["destination_station_id"],
-                json_dumps(item.get("stops_in_order", [])),
                 item.get("first_train_time"),
                 item.get("last_train_time"),
-                json_dumps(item.get("travel_time_from_origin_min", {})),
                 item.get("base_fare_usd", 2.00),
                 item.get("per_stop_rate_usd", 0.50),
                 item.get("frequency_min", 10),
@@ -169,10 +257,8 @@ def seed_metro_schedules(cur):
             "direction",
             "origin_station_id",
             "destination_station_id",
-            "stops_in_order",
             "first_train_time",
             "last_train_time",
-            "travel_time_from_origin_min",
             "base_fare_usd",
             "per_stop_rate_usd",
             "frequency_min",
@@ -182,6 +268,7 @@ def seed_metro_schedules(cur):
     )
 
     print(f"  metro_schedules: {inserted} rows inserted / {len(rows)} prepared")
+    seed_schedule_stops(cur, "metro_schedule_stops", data)
 
 
 def seed_national_rail_schedules(cur):
@@ -201,11 +288,9 @@ def seed_national_rail_schedules(cur):
                 item.get("direction"),
                 item["origin_station_id"],
                 item["destination_station_id"],
-                json_dumps(item.get("stops_in_order", [])),
                 json_dumps(item.get("passed_through_stations", [])),
                 item.get("first_train_time"),
                 item.get("last_train_time"),
-                json_dumps(item.get("travel_time_from_origin_min", {})),
                 json_dumps(item.get("fare_classes", {})),
                 item.get("frequency_min", 60),
                 json_dumps(item.get("operates_on", [])),
@@ -222,11 +307,9 @@ def seed_national_rail_schedules(cur):
             "direction",
             "origin_station_id",
             "destination_station_id",
-            "stops_in_order",
             "passed_through_stations",
             "first_train_time",
             "last_train_time",
-            "travel_time_from_origin_min",
             "fare_classes",
             "frequency_min",
             "operates_on",
@@ -235,6 +318,7 @@ def seed_national_rail_schedules(cur):
     )
 
     print(f"  national_rail_schedules: {inserted} rows inserted / {len(rows)} prepared")
+    seed_schedule_stops(cur, "national_rail_schedule_stops", data)
 
 
 def seed_seat_layouts(cur):
@@ -589,6 +673,10 @@ def seed_feedback(cur):
 
 def print_table_counts(cur):
     tables = [
+        "metro_stations",
+        "national_rail_stations",
+        "metro_schedule_stops",
+        "national_rail_schedule_stops",
         "users",
         "metro_schedules",
         "national_rail_schedules",
