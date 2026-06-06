@@ -45,10 +45,11 @@
 
 ### 2a. 新增車站表
 
-資料來源 `train-mock-data/metro_stations.json`、`national_rail_stations.json` (欄位以 JSON 實際內容為準):
+資料來源 `train-mock-data/metro_stations.json`、`national_rail_stations.json`:
 
-- `metro_stations(station_id VARCHAR PK, name, ...)`
-- `national_rail_stations(station_id VARCHAR PK, name, ...)`
+- `metro_stations(station_id VARCHAR(20) PK, name VARCHAR NOT NULL, + JSON 其餘欄位逐一映射為對應型別欄位)`
+- `national_rail_stations(station_id VARCHAR(20) PK, name VARCHAR NOT NULL, + 同上)`
+- 最低契約: PK = `station_id`、`name NOT NULL`;JSON 中的純量欄位映射為一般欄位,巢狀/陣列欄位 (若有) 映射為 JSONB 並加註解說明
 
 ### 2b. Junction tables 取代 JSONB
 
