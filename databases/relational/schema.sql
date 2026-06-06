@@ -6,6 +6,25 @@
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- ============================================================
+-- Primary-key strategy
+-- Most tables use natural VARCHAR business keys (e.g. 'MS01',
+-- 'NR_SCH01', 'BK-XXXXXX') because the mock dataset ships with
+-- stable, human-readable identifiers referenced across files;
+-- reusing them avoids surrogate-key mapping during seeding and
+-- keeps FK values readable in graded query output.
+-- policy_documents uses SERIAL because RAG chunks have no
+-- natural identifier and are only referenced internally.
+--
+-- Deletion strategy (consistent across all FKs):
+--   * reference/parent data (stations, schedules, seats)
+--       -> ON DELETE RESTRICT  (never silently lose journeys)
+--   * dependent detail rows (credentials, schedule stops, payments)
+--       -> ON DELETE CASCADE   (meaningless without their parent)
+--   * optional audit links (bookings.user_id, feedback.*)
+--       -> ON DELETE SET NULL  (keep the financial/audit record)
+-- ============================================================
+
 
 -- ============================================================
 -- 1. Policy documents table
@@ -19,7 +38,7 @@ CREATE TABLE IF NOT EXISTS policy_documents (
     content TEXT NOT NULL,
     embedding vector(768),
     source_file TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_policy_documents_embedding
@@ -28,6 +47,42 @@ USING hnsw (embedding vector_cosine_ops);
 
 CREATE INDEX IF NOT EXISTS idx_policy_documents_category
 ON policy_documents (category);
+
+
+-- ============================================================
+-- 1b. Stations
+-- Parents for schedule stops, schedules, bookings and trips.
+-- Mirrors train-mock-data/metro_stations.json and
+-- national_rail_stations.json (adjacency lives in Neo4j).
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS metro_stations (
+    station_id VARCHAR(20) PRIMARY KEY,   -- natural key, e.g. 'MS01'
+    name VARCHAR(100) NOT NULL,
+
+    -- e.g. ["M1", "M2"]; kept as JSONB because lines are a small,
+    -- read-only display attribute (graph routing lives in Neo4j)
+    lines JSONB,
+
+    is_interchange_metro BOOLEAN DEFAULT FALSE,
+    is_interchange_national_rail BOOLEAN DEFAULT FALSE,
+    interchange_national_rail_station_id VARCHAR(20),
+
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS national_rail_stations (
+    station_id VARCHAR(20) PRIMARY KEY,   -- natural key, e.g. 'NR01'
+    name VARCHAR(100) NOT NULL,
+
+    lines JSONB,
+
+    is_interchange_national_rail BOOLEAN DEFAULT FALSE,
+    is_interchange_metro BOOLEAN DEFAULT FALSE,
+    interchange_metro_station_id VARCHAR(20),
+
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
 
 
 -- ============================================================
@@ -44,14 +99,8 @@ CREATE TABLE IF NOT EXISTS metro_schedules (
     origin_station_id VARCHAR(20) NOT NULL,
     destination_station_id VARCHAR(20) NOT NULL,
 
-    -- Example: ["MS01", "MS02", "MS03"]
-    stops_in_order JSONB NOT NULL,
-
     first_train_time TIME,
     last_train_time TIME,
-
-    -- Example: {"MS01": 0, "MS02": 3, "MS03": 6}
-    travel_time_from_origin_min JSONB,
 
     base_fare_usd NUMERIC(10, 2) DEFAULT 2.00,
     per_stop_rate_usd NUMERIC(10, 2) DEFAULT 0.50,
@@ -61,7 +110,17 @@ CREATE TABLE IF NOT EXISTS metro_schedules (
     -- Example: ["weekday", "weekend"]
     operates_on JSONB,
 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_metro_schedules_origin
+        FOREIGN KEY (origin_station_id)
+        REFERENCES metro_stations(station_id)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_metro_schedules_destination
+        FOREIGN KEY (destination_station_id)
+        REFERENCES metro_stations(station_id)
+        ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_metro_schedules_origin
@@ -72,6 +131,38 @@ ON metro_schedules (destination_station_id);
 
 CREATE INDEX IF NOT EXISTS idx_metro_schedules_line
 ON metro_schedules (line);
+
+-- ============================================================
+-- 2b. Metro schedule stops (junction table)
+-- Replaces the former stops_in_order / travel_time_from_origin_min
+-- JSONB columns: one row per (schedule, station) with an explicit
+-- 0-based stop_order. This is the 3NF decomposition required for
+-- ordered many-to-many schedule->station data.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS metro_schedule_stops (
+    schedule_id VARCHAR(30) NOT NULL,
+    station_id VARCHAR(20) NOT NULL,
+
+    stop_order INT NOT NULL,                          -- 0 = origin
+    travel_time_from_origin_min INT NOT NULL DEFAULT 0,
+
+    PRIMARY KEY (schedule_id, stop_order),
+    UNIQUE (schedule_id, station_id),
+
+    CONSTRAINT fk_metro_schedule_stops_schedule
+        FOREIGN KEY (schedule_id)
+        REFERENCES metro_schedules(schedule_id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT fk_metro_schedule_stops_station
+        FOREIGN KEY (station_id)
+        REFERENCES metro_stations(station_id)
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_metro_schedule_stops_station
+ON metro_schedule_stops (station_id);
 
 
 -- ============================================================
@@ -89,17 +180,11 @@ CREATE TABLE IF NOT EXISTS national_rail_schedules (
     origin_station_id VARCHAR(20) NOT NULL,
     destination_station_id VARCHAR(20) NOT NULL,
 
-    -- Example: ["NR01", "NR02", "NR03", "NR05"]
-    stops_in_order JSONB NOT NULL,
-
     -- Optional full station detail from mock data
     passed_through_stations JSONB,
 
     first_train_time TIME,
     last_train_time TIME,
-
-    -- Example: {"NR01": 0, "NR02": 15, "NR05": 50}
-    travel_time_from_origin_min JSONB,
 
     -- Example:
     -- {
@@ -113,7 +198,17 @@ CREATE TABLE IF NOT EXISTS national_rail_schedules (
     -- Example: ["weekday", "weekend"]
     operates_on JSONB,
 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_national_rail_schedules_origin
+        FOREIGN KEY (origin_station_id)
+        REFERENCES national_rail_stations(station_id)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_national_rail_schedules_destination
+        FOREIGN KEY (destination_station_id)
+        REFERENCES national_rail_stations(station_id)
+        ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_origin
@@ -124,6 +219,35 @@ ON national_rail_schedules (destination_station_id);
 
 CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_line
 ON national_rail_schedules (line);
+
+-- ============================================================
+-- 3b. National rail schedule stops (junction table)
+-- Same 3NF decomposition as metro_schedule_stops.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS national_rail_schedule_stops (
+    schedule_id VARCHAR(30) NOT NULL,
+    station_id VARCHAR(20) NOT NULL,
+
+    stop_order INT NOT NULL,                          -- 0 = origin
+    travel_time_from_origin_min INT NOT NULL DEFAULT 0,
+
+    PRIMARY KEY (schedule_id, stop_order),
+    UNIQUE (schedule_id, station_id),
+
+    CONSTRAINT fk_national_rail_schedule_stops_schedule
+        FOREIGN KEY (schedule_id)
+        REFERENCES national_rail_schedules(schedule_id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT fk_national_rail_schedule_stops_station
+        FOREIGN KEY (station_id)
+        REFERENCES national_rail_stations(station_id)
+        ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_national_rail_schedule_stops_station
+ON national_rail_schedule_stops (station_id);
 
 
 -- ============================================================
@@ -148,14 +272,14 @@ CREATE TABLE IF NOT EXISTS users (
 
     is_active BOOLEAN DEFAULT TRUE,
 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS user_credentials (
     user_id VARCHAR(30) PRIMARY KEY,
     password_hash TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_user_credentials_user
         FOREIGN KEY (user_id)
         REFERENCES users(user_id)
@@ -189,7 +313,7 @@ CREATE TABLE IF NOT EXISTS seat_layouts (
     is_window BOOLEAN DEFAULT FALSE,
     is_aisle BOOLEAN DEFAULT FALSE,
 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT fk_seat_layouts_schedule
         FOREIGN KEY (schedule_id)
@@ -232,8 +356,8 @@ CREATE TABLE IF NOT EXISTS bookings (
     price_paid_usd NUMERIC(10, 2),
     refund_amount_usd NUMERIC(10, 2) DEFAULT 0.00,
 
-    booked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    cancelled_at TIMESTAMP,
+    booked_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    cancelled_at TIMESTAMPTZ,
 
     CONSTRAINT fk_bookings_user
         FOREIGN KEY (user_id)
@@ -285,7 +409,7 @@ CREATE TABLE IF NOT EXISTS metro_trips (
     travel_date DATE,
     fare_paid_usd NUMERIC(10, 2),
 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT fk_metro_trips_user
         FOREIGN KEY (user_id)
@@ -323,8 +447,8 @@ CREATE TABLE IF NOT EXISTS payments (
     payment_method VARCHAR(50),
     payment_status VARCHAR(30) DEFAULT 'paid' CHECK (payment_status IN ('paid', 'pending', 'failed', 'refunded')),
 
-    paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    paid_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT fk_payments_booking
         FOREIGN KEY (booking_id)
@@ -361,7 +485,7 @@ CREATE TABLE IF NOT EXISTS feedback (
     rating INT,
     comment TEXT,
 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT fk_feedback_user
         FOREIGN KEY (user_id)
@@ -384,31 +508,19 @@ ON feedback (booking_id);
 -- [Optimization] Create GIN indexes for JSONB columns in `metro_schedules`
 -- ============================================================
 
-CREATE INDEX IF NOT EXISTS idx_metro_schedules_stops_gin
-ON metro_schedules USING GIN (stops_in_order);
-
 CREATE INDEX IF NOT EXISTS idx_metro_schedules_operates_on_gin
 ON metro_schedules USING GIN (operates_on);
-
-CREATE INDEX IF NOT EXISTS idx_metro_schedules_travel_time_gin
-ON metro_schedules USING GIN (travel_time_from_origin_min);
 
 
 -- ============================================================
 -- [Optimization] Create GIN indexes for JSONB columns in `national_rail_schedules`
 -- ============================================================
 
-CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_stops_gin
-ON national_rail_schedules USING GIN (stops_in_order);
-
 CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_passed_gin
 ON national_rail_schedules USING GIN (passed_through_stations);
 
 CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_operates_on_gin
 ON national_rail_schedules USING GIN (operates_on);
-
-CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_travel_time_gin
-ON national_rail_schedules USING GIN (travel_time_from_origin_min);
 
 CREATE INDEX IF NOT EXISTS idx_national_rail_schedules_fare_classes_gin
 ON national_rail_schedules USING GIN (fare_classes);
