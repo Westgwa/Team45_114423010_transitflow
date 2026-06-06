@@ -23,6 +23,11 @@
 | 9 | schema 缺 PK 選擇 (UUID/SERIAL) 理由註解 | `schema.sql` | Medium |
 | 10 | 缺分工報告 `Team<Id>_WORK_ALLOCATION.md` | repo 根目錄 | Medium |
 | 11 | Repo 名 `DB-FinalProject` 不符 `Team<Id>_<隊長學號>_transitflow` 格式 | GitHub | Medium (需團隊操作) |
+| 12 | `get_db_connection` 被 `@contextmanager` 裝飾但用 `return` 而非 `yield`,且連線從未歸還 pool — 所有 `with get_db_connection()` 一執行就 TypeError | `queries.py:61-70` | Critical (runtime crash) |
+| 13 | `execute_booking` 完全沒有寫入 `payments` 表 — work.txt B9 要求 booking+payment 同一 transaction | `queries.py:888-1039` | High (Live B9 = 5 分) |
+| 14 | Neo4j 連線關係用 `CONNECTS_TO`,指南 Task 4 + Live Section A 要求 `METRO_LINK` / `RAIL_LINK` (三種關係: METRO_LINK, RAIL_LINK, INTERCHANGE_TO) | `seed_neo4j.py:88`, `graph/queries.py` 全部路由查詢 | Critical (Task 4 = 8 分 + Live Section A) |
+| 15 | `query_cheapest_route` 無 `fare_class` 參數 — work.txt C2 要求 fare class 影響 cost | `graph/queries.py:121` | High (Live C2 = 7 分) |
+| 16 | `query_delay_ripple` 在變長路徑用 `*1..$hops` 參數 — Cypher 不支援,執行即語法錯誤 | `graph/queries.py:325` | Critical (Live C5) |
 
 已符合、不需改動: 密碼欄位設計 (`user_credentials.password_hash`)、seed 冪等性 (`ON CONFLICT DO NOTHING` + Neo4j `MERGE`)、所有 query function 無 `pass`/`NotImplementedError`、FK 皆有 ON DELETE 策略、票價 NUMERIC、Task 6 標記 (`TASK6.md` + `# TASK 6 EXTENSION:`) 齊全。
 
@@ -35,11 +40,25 @@
 - `_hash_password(plain: str) -> str`: 回傳 argon2id hash 字串
 - `_verify_password(stored_hash: str, plain: str) -> tuple[bool, bool]`: 回傳 `(是否正確, 是否需要 rehash)`,對應 `queries.py:1255` 既有解包;驗證失敗 (含 hash 格式錯誤) 回 `(False, False)`,不拋例外
 
-### 1b. Neo4j 關係改名 `INTERCHANGES_WITH` → `INTERCHANGE_TO`
+### 1b. Neo4j 關係全面改名 (三種關係類型)
 
-- `skeleton/seed_neo4j.py:106,112` 與 `databases/graph/queries.py` 全檔出現處同步改名
-- 實作時確認 seed 腳本能清掉舊關係 (或在 seed 前 `MATCH ()-[r:INTERCHANGES_WITH]->() DELETE r`),避免新舊並存
-- 驗證: 改完後 `INTERCHANGE_TO` count > 0 且 `INTERCHANGES_WITH` count = 0
+依指南 Task 4 要求的三種關係類型,seed 與 queries 同步改:
+
+- `CONNECTS_TO` (network=metro) → `METRO_LINK`
+- `CONNECTS_TO` (network=national_rail,含 NR_ALT) → `RAIL_LINK`
+- `INTERCHANGES_WITH` → `INTERCHANGE_TO`
+- seed 開頭已有 `MATCH (n) DETACH DELETE n` (seed_neo4j.py:199),舊關係自動清除
+- 驗證: 三種關係 count > 0;`CONNECTS_TO` 與 `INTERCHANGES_WITH` count = 0
+
+### 1c. 修復 `get_db_connection` (queries.py:61-70)
+
+- 改為真正的 generator: `yield conn`,正常結束 `conn.commit()`、例外 `conn.rollback()` 後 re-raise、`finally` 歸還 `putconn(conn)`
+- 移除 `conn.autocommit = True` — 一個 `with` 區塊 = 一個 transaction,直接滿足 B9「booking+payment 一次 commit」
+
+### 1d. Graph queries 其他修正
+
+- `query_cheapest_route` 新增 `fare_class: str = "standard"` 參數;seed 在關係上存 `fare_standard` / `fare_first` 兩個屬性 (metro 平價,rail first = travel_time × 0.60 vs standard × 0.35),Dijkstra 權重屬性依 fare_class 從白名單選擇
+- `query_delay_ripple` 的 `*1..$hops` 改為驗證後的整數內插 (Cypher 不允許參數作為變長上限)
 
 ## Part 2 — 車站表 + Junction Table 重構 (Task 1 核心)
 
@@ -80,6 +99,12 @@ CREATE TABLE metro_schedule_stops (
 - 全部 `TIMESTAMP` → `TIMESTAMPTZ` (`DEFAULT CURRENT_TIMESTAMP` 保留)
 - schema.sql 開頭加註解區塊: 說明 PK 策略 — 業務代碼 VARCHAR 自然鍵 (對應 mock data 的 `MS_SCH01` 等) vs SERIAL/UUID 的取捨
 - 補一行刪除策略總述註解 (各 FK 已逐一標 ON DELETE)
+
+## Part 3.5 — Booking / Payment Transaction (B9, B10)
+
+- `execute_booking` 在同一 `with` 區塊內 (= 同一 transaction) 於 bookings INSERT 後新增 payments INSERT (`payment_status='paid'`, amount = 計算出的 fare),回傳值附 payment 資訊
+- `execute_cancellation` 在同一 transaction 內將該 booking 的 payments 標記 `payment_status='refunded'` (refund > 0 時)
+- 兩者皆依賴 1c 修復後的 commit-on-exit 語義,中途失敗整筆 rollback
 
 ## Part 4 — `query_user_bookings` 行為修正
 
