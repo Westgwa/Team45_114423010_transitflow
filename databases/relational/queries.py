@@ -453,6 +453,40 @@ def query_national_rail_availability(
             return results
 
 
+def _compute_national_rail_fare(fare_classes, fare_class: str, stops_travelled: int) -> dict:
+    """Pure fare maths shared by query_national_rail_fare and execute_booking.
+
+    fare_classes is the (possibly raw JSONB) fare_classes value from a
+    national_rail_schedules row; falls back to standard class and default
+    rates when data is missing.
+    """
+    fare_classes = _safe_json(fare_classes, {})
+    if not isinstance(fare_classes, dict):
+        fare_classes = {}
+
+    class_info = (
+        fare_classes.get(fare_class)
+        or fare_classes.get(fare_class.capitalize())
+        or fare_classes.get("standard")
+        or {}
+    )
+    if not isinstance(class_info, dict):
+        class_info = {}
+
+    base = _as_float(class_info.get("base_fare_usd"), 5.0)
+    per_stop = _as_float(class_info.get("per_stop_rate_usd"), 2.0)
+    total = round(base + max(stops_travelled, 0) * per_stop, 2)
+
+    return {
+        "fare_class": fare_class,
+        "stops_travelled": stops_travelled,
+        "base_fare_usd": base,
+        "per_stop_rate_usd": per_stop,
+        "total_fare_usd": total,
+        "currency": "USD",
+    }
+
+
 def query_national_rail_fare(
     schedule_id: str,
     fare_class: str = "standard",
@@ -483,34 +517,10 @@ def query_national_rail_fare(
                 return {"error": f"Schedule {schedule_id} not found."}
 
             sched = dict(row)
-            fare_classes = _safe_json(sched.get("fare_classes"), {})
-
-            if not isinstance(fare_classes, dict):
-                fare_classes = {}
-
-            class_info = (
-                fare_classes.get(fare_class)
-                or fare_classes.get(fare_class.capitalize())
-                or fare_classes.get("standard")
-                or {}
+            fare = _compute_national_rail_fare(
+                sched.get("fare_classes"), fare_class, stops_travelled
             )
-
-            if not isinstance(class_info, dict):
-                class_info = {}
-
-            base = _as_float(class_info.get("base_fare_usd"), 5.0)
-            per_stop = _as_float(class_info.get("per_stop_rate_usd"), 2.0)
-            total = round(base + max(stops_travelled, 0) * per_stop, 2)
-
-            return {
-                "schedule_id": schedule_id,
-                "fare_class": fare_class,
-                "stops_travelled": stops_travelled,
-                "base_fare_usd": base,
-                "per_stop_rate_usd": per_stop,
-                "total_fare_usd": total,
-                "currency": "USD",
-            }
+            return {"schedule_id": schedule_id, **fare}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1054,35 +1064,16 @@ def execute_booking(
 
                 stops_travelled = orders["destination_order"] - orders["origin_order"]
 
-                # Inline fare computation (same maths as query_national_rail_fare,
-                # executed on this cursor so booking + payment stay in ONE
-                # transaction on ONE connection).
-                fare_classes = _safe_json(schedule_row.get("fare_classes"), {})
-                if not isinstance(fare_classes, dict):
-                    fare_classes = {}
-
-                class_info = (
-                    fare_classes.get(fare_class)
-                    or fare_classes.get(fare_class.capitalize())
-                    or fare_classes.get("standard")
-                    or {}
-                )
-                if not isinstance(class_info, dict):
-                    class_info = {}
-
-                base = _as_float(class_info.get("base_fare_usd"), 5.0)
-                per_stop = _as_float(class_info.get("per_stop_rate_usd"), 2.0)
-                price = round(base + max(stops_travelled, 0) * per_stop, 2)
-
+                # Fare maths shared with query_national_rail_fare, executed on
+                # data already fetched on this cursor so booking + payment stay
+                # in ONE transaction on ONE connection.
                 fare = {
                     "schedule_id": schedule_id,
-                    "fare_class": fare_class,
-                    "stops_travelled": stops_travelled,
-                    "base_fare_usd": base,
-                    "per_stop_rate_usd": per_stop,
-                    "total_fare_usd": price,
-                    "currency": "USD",
+                    **_compute_national_rail_fare(
+                        schedule_row.get("fare_classes"), fare_class, stops_travelled
+                    ),
                 }
+                price = fare["total_fare_usd"]
 
                 # Accept either globally unique seat_id or raw seat_no.
                 final_seat_id = seat_id
