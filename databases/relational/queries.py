@@ -22,8 +22,12 @@ from __future__ import annotations
 import json
 import random
 import string
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
+
+from argon2 import PasswordHasher
+from argon2 import exceptions as argon2_exceptions
 
 import psycopg2
 import psycopg2.extras
@@ -60,14 +64,24 @@ def close_pool():
 
 @contextmanager
 def get_db_connection():
-    """Optimization 2: Safe connection borrow/return mechanism (Context Manager).
-    Replaces the previous `_connect()` function which created a new connection
-    on every call.
+    """Borrow a pooled connection as a context manager.
+
+    One `with` block = one transaction:
+    - commits on normal exit (so multi-statement writes such as
+      booking + payment are persisted atomically),
+    - rolls back and re-raises on any exception,
+    - always returns the connection to the pool.
     """
     pool_instance = _get_pool()
     conn = pool_instance.getconn()
-    conn.autocommit = True
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool_instance.putconn(conn)
 
 
 def _gen_booking_id() -> str:
@@ -78,6 +92,36 @@ def _gen_booking_id() -> str:
 def _gen_payment_id() -> str:
     suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
     return f"PM-{suffix}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Password hashing (Argon2id — same hasher settings as skeleton/seed_postgres.py
+# so seeded credentials verify correctly at login)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ph = PasswordHasher()
+
+
+def _hash_password(plain_password: str) -> str:
+    """Hash a plaintext password with Argon2id (memory-hard KDF, random salt)."""
+    return _ph.hash(plain_password)
+
+
+def _verify_password(stored_hash: str, plain_password: str) -> tuple[bool, bool]:
+    """Verify a password against a stored Argon2 hash.
+
+    Returns (is_valid, needs_rehash). Never raises: malformed or
+    non-matching hashes simply yield (False, False).
+    """
+    try:
+        _ph.verify(stored_hash, plain_password)
+    except (
+        argon2_exceptions.VerifyMismatchError,
+        argon2_exceptions.VerificationError,
+        argon2_exceptions.InvalidHashError,
+    ):
+        return False, False
+    return True, _ph.check_needs_rehash(stored_hash)
 
 
 def _table_exists(cur, table_name: str) -> bool:
@@ -170,7 +214,7 @@ def _ensure_user_auth_columns(cur):
                 full_name VARCHAR(100) NOT NULL,
                 email VARCHAR(150) UNIQUE NOT NULL,
                 phone VARCHAR(50),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -180,8 +224,8 @@ def _ensure_user_auth_columns(cur):
         CREATE TABLE IF NOT EXISTS user_credentials (
             user_id VARCHAR(30) PRIMARY KEY,
             password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             CONSTRAINT fk_user_credentials_user
                 FOREIGN KEY (user_id)
                 REFERENCES users(user_id)
