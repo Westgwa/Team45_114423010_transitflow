@@ -1,6 +1,6 @@
-# TransitFlow Design Document — Team XX
+# TransitFlow Design Document — Team 45
 
-> TODO(team): replace XX with the real team id, rename this file to Team<Id>_DESIGN_DOC.md, and delete this notice.
+**Team Members:** 郭明儒 (114423010, Team Leader) · 卓少筠 (113403005) · 林楷崋 (113403018)
 
 ## Section 1 — Entity-Relationship Diagram
 
@@ -316,7 +316,7 @@ This extension is intentionally database-focused, because database extensions ar
 
 - Added documentation files:
   - `TASK6.md` listing all modified files and functions for the bonus requirement.
-  - `TeamXX_DESIGN_DOC.md` containing Section 7 for motivation, changes, example queries, and testing evidence.
+  - `Team45_DESIGN_DOC.md` containing Section 7 for motivation, changes, example queries, and testing evidence.
 
 ### 7.3 Example Queries
 

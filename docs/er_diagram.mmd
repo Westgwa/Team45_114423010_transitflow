@@ -1,0 +1,105 @@
+erDiagram
+    users ||--|| user_credentials : "1:1 has"
+    users |o--o{ bookings : "1:N makes"
+    users |o--o{ metro_trips : "1:N takes"
+    users |o--o{ payments : "1:N pays"
+    users |o--o{ feedback : "1:N writes"
+    bookings ||--o{ payments : "1:N paid by"
+    bookings |o--o{ feedback : "1:N reviewed in"
+    seat_layouts |o--o{ bookings : "1:N reserved in"
+    national_rail_schedules ||--o{ bookings : "1:N booked on"
+    national_rail_schedules ||--o{ seat_layouts : "1:N has seats"
+    national_rail_schedules ||--o{ national_rail_schedule_stops : "1:N ordered stops"
+    national_rail_stations ||--o{ national_rail_schedule_stops : "1:N appears in"
+    national_rail_stations ||--o{ national_rail_schedules : "1:N origin/dest of"
+    metro_schedules ||--o{ metro_schedule_stops : "1:N ordered stops"
+    metro_stations ||--o{ metro_schedule_stops : "1:N appears in"
+    metro_stations ||--o{ metro_schedules : "1:N origin/dest of"
+    metro_schedules |o--o{ metro_trips : "1:N used by"
+
+    users {
+        varchar user_id PK
+        varchar email UK
+        varchar full_name
+        date date_of_birth
+    }
+    user_credentials {
+        varchar user_id PK, FK
+        text password_hash
+        timestamptz updated_at
+    }
+    metro_stations {
+        varchar station_id PK
+        varchar name
+        jsonb lines
+    }
+    national_rail_stations {
+        varchar station_id PK
+        varchar name
+        jsonb lines
+    }
+    metro_schedules {
+        varchar schedule_id PK
+        varchar origin_station_id FK
+        varchar destination_station_id FK
+        numeric base_fare_usd
+        numeric per_stop_rate_usd
+    }
+    national_rail_schedules {
+        varchar schedule_id PK
+        varchar origin_station_id FK
+        varchar destination_station_id FK
+        jsonb fare_classes
+        varchar service_type
+    }
+    metro_schedule_stops {
+        varchar schedule_id PK, FK
+        int stop_order PK
+        varchar station_id FK
+        int travel_time_from_origin_min
+    }
+    national_rail_schedule_stops {
+        varchar schedule_id PK, FK
+        int stop_order PK
+        varchar station_id FK
+        int travel_time_from_origin_min
+    }
+    seat_layouts {
+        varchar seat_id PK
+        varchar schedule_id FK
+        varchar fare_class
+        varchar seat_no
+    }
+    bookings {
+        varchar booking_id PK
+        varchar user_id FK
+        varchar schedule_id FK
+        varchar seat_id FK
+        numeric price_paid_usd
+        varchar status
+    }
+    metro_trips {
+        varchar trip_id PK
+        varchar user_id FK
+        varchar schedule_id FK
+        numeric fare_paid_usd
+    }
+    payments {
+        varchar payment_id PK
+        varchar booking_id FK
+        varchar user_id FK
+        numeric amount_usd
+        varchar payment_status
+    }
+    feedback {
+        varchar feedback_id PK
+        varchar user_id FK
+        varchar booking_id FK
+        int rating
+    }
+    policy_documents {
+        serial id PK
+        text title
+        vector_768 embedding
+        text source_file
+    }
