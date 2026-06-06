@@ -79,17 +79,28 @@ def _seed_rail_stations_batch(session, stations: list[dict]):
     )
 
 
-def _seed_connections_batch(session, connections: list[dict]):
+def _seed_connections_batch(session, connections: list[dict], rel_type: str):
+    # rel_type is code-controlled ("METRO_LINK" / "RAIL_LINK"), never user
+    # input, so f-string interpolation of the relationship type is safe
+    # (Cypher cannot parameterise relationship types).
     session.run(
-        """
+        f"""
         UNWIND $connections AS c
-        MATCH (a:Station {station_id: c.from_id})
-        MATCH (b:Station {station_id: c.to_id})
-        MERGE (a)-[r:CONNECTS_TO {line: c.line, network: c.network}]->(b)
+        MATCH (a:Station {{station_id: c.from_id}})
+        MATCH (b:Station {{station_id: c.to_id}})
+        MERGE (a)-[r:{rel_type} {{line: c.line, network: c.network}}]->(b)
         SET r.travel_time_min = toInteger(c.travel_time_min),
             r.fare = CASE
                 WHEN c.network = "metro" THEN 1.0
                 ELSE toFloat(c.travel_time_min) * 0.35
+            END,
+            r.fare_standard = CASE
+                WHEN c.network = "metro" THEN 1.0
+                ELSE toFloat(c.travel_time_min) * 0.35
+            END,
+            r.fare_first = CASE
+                WHEN c.network = "metro" THEN 1.0
+                ELSE toFloat(c.travel_time_min) * 0.60
             END
         """,
         connections=connections
@@ -103,15 +114,19 @@ def _seed_interchanges_batch(session, interchanges: list[dict]) -> list[tuple[st
         MATCH (m:Station {station_id: i.metro_id})
         MATCH (r:Station {station_id: i.rail_id})
 
-        MERGE (m)-[a:INTERCHANGES_WITH]->(r)
+        MERGE (m)-[a:INTERCHANGE_TO]->(r)
         SET a.travel_time_min = 5,
             a.fare = 0.0,
+            a.fare_standard = 0.0,
+            a.fare_first = 0.0,
             a.network = "interchange",
             a.line = "INTERCHANGE"
 
-        MERGE (r)-[b:INTERCHANGES_WITH]->(m)
+        MERGE (r)-[b:INTERCHANGE_TO]->(m)
         SET b.travel_time_min = 5,
             b.fare = 0.0,
+            b.fare_standard = 0.0,
+            b.fare_first = 0.0,
             b.network = "interchange",
             b.line = "INTERCHANGE"
             
@@ -224,7 +239,7 @@ def seed():
                         "travel_time_min": adj.get("travel_time_min", 1),
                         "network": "metro"
                     })
-            _seed_connections_batch(session, metro_links)
+            _seed_connections_batch(session, metro_links, "METRO_LINK")
             print(f"Created {len(metro_links)} metro links")
 
             # 4. Create national rail links (In-Memory Flattening -> Batch Insert)
@@ -242,7 +257,7 @@ def seed():
                         "travel_time_min": adj.get("travel_time_min", 1),
                         "network": "national_rail"
                     })
-            _seed_connections_batch(session, rail_links)
+            _seed_connections_batch(session, rail_links, "RAIL_LINK")
             print(f"Created {len(rail_links)} national rail links")
 
             # 4.5 Extra fallback / disruption alternative rail links
@@ -261,7 +276,7 @@ def seed():
                     "travel_time_min": travel_time_min,
                     "network": "national_rail"
                 })
-            _seed_connections_batch(session, extra_links)
+            _seed_connections_batch(session, extra_links, "RAIL_LINK")
             print(f"Created {len(extra_links)} extra alternative rail links")
 
             # 5. Create metro <-> national rail interchange relationships
@@ -292,19 +307,19 @@ def seed():
             ).single()["total"]
 
             total_interchanges = session.run(
-                "MATCH ()-[r:INTERCHANGES_WITH]->() RETURN count(r) AS total"
+                "MATCH ()-[r:INTERCHANGE_TO]->() RETURN count(r) AS total"
             ).single()["total"]
 
             total_alt_links = session.run(
                 """
-                MATCH ()-[r:CONNECTS_TO {line: "NR_ALT"}]->()
+                MATCH ()-[r:RAIL_LINK {line: "NR_ALT"}]->()
                 RETURN count(r) AS total
                 """
             ).single()["total"]
 
             print(f"Total nodes: {total_nodes}")
             print(f"Total relationships: {total_rels}")
-            print(f"Total INTERCHANGES_WITH relationships: {total_interchanges}")
+            print(f"Total INTERCHANGE_TO relationships: {total_interchanges}")
             print(f"Total NR_ALT alternative links: {total_alt_links}")
 
     finally:
