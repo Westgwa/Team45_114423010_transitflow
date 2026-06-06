@@ -338,8 +338,9 @@ def query_national_rail_availability(
     travel_date: Optional[str] = None,
 ) -> list[dict]:
     """
-    Return national rail schedules that serve both origin and destination stations
-    in the correct order.
+    Return national rail schedules serving origin before destination,
+    resolved through the national_rail_schedule_stops junction table.
+    Returns [] when nothing matches (never raises for missing data).
     """
     origin_id = origin_id.upper()
     destination_id = destination_id.upper()
@@ -347,32 +348,53 @@ def query_national_rail_availability(
     with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if not _table_exists(cur, "national_rail_schedules"):
-                return [{"error": "national_rail_schedules table does not exist."}]
+                return []
+            if not _table_exists(cur, "national_rail_schedule_stops"):
+                return []
 
-            cur.execute("SELECT * FROM national_rail_schedules ORDER BY schedule_id;")
+            # Self-join the junction table: the origin stop must appear
+            # strictly before the destination stop on the same schedule.
+            cur.execute(
+                """
+                SELECT
+                    s.*,
+                    o.stop_order AS origin_order,
+                    o.travel_time_from_origin_min AS origin_time_min,
+                    d.stop_order AS destination_order,
+                    d.travel_time_from_origin_min AS destination_time_min
+                FROM national_rail_schedules s
+                JOIN national_rail_schedule_stops o
+                    ON o.schedule_id = s.schedule_id
+                   AND o.station_id = %s
+                JOIN national_rail_schedule_stops d
+                    ON d.schedule_id = s.schedule_id
+                   AND d.station_id = %s
+                WHERE o.stop_order < d.stop_order
+                ORDER BY s.schedule_id
+                """,
+                (origin_id, destination_id),
+            )
             schedules = [dict(row) for row in cur.fetchall()]
 
             results = []
 
             for sched in schedules:
-                stops = _safe_json(sched.get("stops_in_order"), [])
-
-                if not stops:
-                    continue
-
-                stops_upper = [str(s).upper() for s in stops]
-
-                if origin_id not in stops_upper or destination_id not in stops_upper:
-                    continue
-
-                origin_index = stops_upper.index(origin_id)
-                destination_index = stops_upper.index(destination_id)
-
-                if origin_index >= destination_index:
-                    continue
-
-                stops_travelled = destination_index - origin_index
-                journey_stops = stops[origin_index: destination_index + 1]
+                cur.execute(
+                    """
+                    SELECT station_id
+                    FROM national_rail_schedule_stops
+                    WHERE schedule_id = %s
+                    ORDER BY stop_order
+                    """,
+                    (sched["schedule_id"],),
+                )
+                # stop_order is 0-based and contiguous (seeded via enumerate),
+                # so list position == stop_order.
+                all_stops = [r["station_id"] for r in cur.fetchall()]
+                journey_stops = all_stops[
+                    sched["origin_order"]: sched["destination_order"] + 1
+                ]
+                stops_travelled = sched["destination_order"] - sched["origin_order"]
 
                 total_booked = 0
                 standard_booked = 0
@@ -390,7 +412,7 @@ def query_national_rail_availability(
                           AND travel_date = %s
                           AND LOWER(COALESCE(status, 'active')) NOT IN ('cancelled', 'canceled')
                         """,
-                        (sched.get("schedule_id"), travel_date),
+                        (sched["schedule_id"], travel_date),
                     )
                     booking_row = cur.fetchone()
 
@@ -399,10 +421,11 @@ def query_national_rail_availability(
                         standard_booked = booking_row["standard_booked"] or 0
                         first_booked = booking_row["first_booked"] or 0
 
-                travel_times = _safe_json(sched.get("travel_time_from_origin_min"), {})
-                origin_time = _as_float(travel_times.get(origin_id), 0.0) if isinstance(travel_times, dict) else 0.0
-                dest_time = _as_float(travel_times.get(destination_id), 0.0) if isinstance(travel_times, dict) else 0.0
-                duration = max(dest_time - origin_time, 0.0)
+                duration = max(
+                    _as_float(sched.get("destination_time_min"), 0.0)
+                    - _as_float(sched.get("origin_time_min"), 0.0),
+                    0.0,
+                )
 
                 results.append(
                     {
@@ -416,7 +439,7 @@ def query_national_rail_availability(
                         "frequency_min": sched.get("frequency_min"),
                         "stops_travelled": stops_travelled,
                         "stops_in_order": journey_stops,
-                        "full_route": stops,
+                        "full_route": all_stops,
                         "estimated_duration_min": duration,
                         "travel_date": travel_date,
                         "seat_occupancy": {
@@ -496,7 +519,9 @@ def query_national_rail_fare(
 
 def query_metro_schedules(origin_id: str, destination_id: str) -> list[dict]:
     """
-    Return metro schedules that serve origin and destination in the correct order.
+    Return metro schedules serving origin before destination, resolved
+    through the metro_schedule_stops junction table. Returns [] when
+    nothing matches.
     """
     origin_id = origin_id.upper()
     destination_id = destination_id.upper()
@@ -505,36 +530,54 @@ def query_metro_schedules(origin_id: str, destination_id: str) -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if not _table_exists(cur, "metro_schedules"):
                 return []
+            if not _table_exists(cur, "metro_schedule_stops"):
+                return []
 
-            cur.execute("SELECT * FROM metro_schedules ORDER BY schedule_id;")
+            cur.execute(
+                """
+                SELECT
+                    s.*,
+                    o.stop_order AS origin_order,
+                    o.travel_time_from_origin_min AS origin_time_min,
+                    d.stop_order AS destination_order,
+                    d.travel_time_from_origin_min AS destination_time_min
+                FROM metro_schedules s
+                JOIN metro_schedule_stops o
+                    ON o.schedule_id = s.schedule_id
+                   AND o.station_id = %s
+                JOIN metro_schedule_stops d
+                    ON d.schedule_id = s.schedule_id
+                   AND d.station_id = %s
+                WHERE o.stop_order < d.stop_order
+                ORDER BY s.schedule_id
+                """,
+                (origin_id, destination_id),
+            )
             schedules = [dict(row) for row in cur.fetchall()]
 
             results = []
 
             for sched in schedules:
-                stops = _safe_json(sched.get("stops_in_order"), [])
+                cur.execute(
+                    """
+                    SELECT station_id
+                    FROM metro_schedule_stops
+                    WHERE schedule_id = %s
+                    ORDER BY stop_order
+                    """,
+                    (sched["schedule_id"],),
+                )
+                all_stops = [r["station_id"] for r in cur.fetchall()]
+                journey_stops = all_stops[
+                    sched["origin_order"]: sched["destination_order"] + 1
+                ]
+                stops_travelled = sched["destination_order"] - sched["origin_order"]
 
-                if not stops:
-                    continue
-
-                stops_upper = [str(s).upper() for s in stops]
-
-                if origin_id not in stops_upper or destination_id not in stops_upper:
-                    continue
-
-                origin_index = stops_upper.index(origin_id)
-                destination_index = stops_upper.index(destination_id)
-
-                if origin_index >= destination_index:
-                    continue
-
-                stops_travelled = destination_index - origin_index
-                journey_stops = stops[origin_index: destination_index + 1]
-
-                travel_times = _safe_json(sched.get("travel_time_from_origin_min"), {})
-                origin_time = _as_float(travel_times.get(origin_id), 0.0) if isinstance(travel_times, dict) else 0.0
-                dest_time = _as_float(travel_times.get(destination_id), 0.0) if isinstance(travel_times, dict) else 0.0
-                duration = max(dest_time - origin_time, 0.0)
+                duration = max(
+                    _as_float(sched.get("destination_time_min"), 0.0)
+                    - _as_float(sched.get("origin_time_min"), 0.0),
+                    0.0,
+                )
 
                 item = dict(sched)
                 item.update(
@@ -543,6 +586,7 @@ def query_metro_schedules(origin_id: str, destination_id: str) -> list[dict]:
                         "destination_id": destination_id,
                         "stops_travelled": stops_travelled,
                         "journey_stops": journey_stops,
+                        "stops_in_order": all_stops,
                         "estimated_duration_min": duration,
                     }
                 )
@@ -690,38 +734,56 @@ def query_user_profile(email: str) -> Optional[dict]:
             return data
 
 
-def query_user_bookings(user_email: str) -> list[dict]:
+def query_user_bookings(user_email: str) -> dict:
     """
-    Return booking history for a user email.
+    Return booking history for a user, ALWAYS as
+    {"national_rail": [...], "metro": [...]} — empty lists when the
+    user or tables are missing (never raises, never returns an error row).
     """
-    profile = query_user_profile(user_email)
+    result: dict = {"national_rail": [], "metro": []}
 
+    profile = query_user_profile(user_email)
     if not profile:
-        return [{"error": "User profile not found."}]
+        return result
 
     user_id = profile["user_id"]
 
     with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            if not _table_exists(cur, "bookings"):
-                return []
+            if _table_exists(cur, "bookings"):
+                cur.execute(
+                    """
+                    SELECT
+                        b.*,
+                        s.line,
+                        s.service_type
+                    FROM bookings b
+                    LEFT JOIN national_rail_schedules s
+                        ON s.schedule_id = b.schedule_id
+                    WHERE b.user_id = %s
+                    ORDER BY b.travel_date DESC NULLS LAST, b.booked_at DESC NULLS LAST
+                    """,
+                    (user_id,),
+                )
+                result["national_rail"] = [dict(row) for row in cur.fetchall()]
 
-            cur.execute(
-                """
-                SELECT
-                    b.*,
-                    s.line,
-                    s.service_type
-                FROM bookings b
-                LEFT JOIN national_rail_schedules s
-                    ON s.schedule_id = b.schedule_id
-                WHERE b.user_id = %s
-                ORDER BY b.travel_date DESC NULLS LAST, b.booked_at DESC NULLS LAST
-                """,
-                (user_id,),
-            )
+            if _table_exists(cur, "metro_trips"):
+                cur.execute(
+                    """
+                    SELECT
+                        t.*,
+                        ms.line
+                    FROM metro_trips t
+                    LEFT JOIN metro_schedules ms
+                        ON ms.schedule_id = t.schedule_id
+                    WHERE t.user_id = %s
+                    ORDER BY t.travel_date DESC NULLS LAST, t.created_at DESC NULLS LAST
+                    """,
+                    (user_id,),
+                )
+                result["metro"] = [dict(row) for row in cur.fetchall()]
 
-            return [dict(row) for row in cur.fetchall()]
+    return result
 
 
 def query_trip_history(user_email: str, limit: int = 20) -> dict:
@@ -827,26 +889,21 @@ def query_route_visualization(origin_station: str, destination_station: str, rou
             if not _table_exists(cur, table_name):
                 return {"error": f"Table {table_name} not found.", "routes": []}
 
-            # Query routes between two stations.
-            # Include all metadata for visualization (stops, times, fares).
+            # table_name / stops_table are chosen from an in-code whitelist
+            # branch on route_type (validated above), NOT from user input, so
+            # interpolating them into the f-string SQL is safe.
+            stops_table = (
+                "national_rail_schedule_stops"
+                if route_type == "national_rail"
+                else "metro_schedule_stops"
+            )
+
             cur.execute(
                 f"""
-                SELECT
-                    schedule_id,
-                    line,
-                    service_type,
-                    direction,
-                    origin_station_id,
-                    destination_station_id,
-                    stops_in_order,
-                    travel_time_from_origin_min,
-                    first_train_time,
-                    last_train_time,
-                    frequency_min,
-                    fare_classes
+                SELECT *
                 FROM {table_name}
                 WHERE origin_station_id = %s AND destination_station_id = %s
-                ORDER BY line, service_type
+                ORDER BY line
                 """,
                 (origin_station, destination_station),
             )
@@ -854,25 +911,29 @@ def query_route_visualization(origin_station: str, destination_station: str, rou
             routes = []
             for row in cur.fetchall():
                 route_dict = dict(row)
-                
-                # Parse JSON fields for easier visualization
-                stops = route_dict.get("stops_in_order", [])
-                times = route_dict.get("travel_time_from_origin_min", {})
-                fares = route_dict.get("fare_classes", {})
-                
-                # Build a route summary with stop details
+
+                # Resolve ordered stops from the junction table.
+                cur.execute(
+                    f"""
+                    SELECT station_id, stop_order, travel_time_from_origin_min
+                    FROM {stops_table}
+                    WHERE schedule_id = %s
+                    ORDER BY stop_order
+                    """,
+                    (route_dict["schedule_id"],),
+                )
                 route_dict["stops_detail"] = [
                     {
-                        "station_id": station_id,
-                        "position": idx,
-                        "travel_time_min": times.get(station_id, 0) if isinstance(times, dict) else 0,
+                        "station_id": stop["station_id"],
+                        "position": stop["stop_order"],
+                        "travel_time_min": stop["travel_time_from_origin_min"],
                     }
-                    for idx, station_id in enumerate(stops)
+                    for stop in cur.fetchall()
                 ]
-                
-                # Include fare information summary
+
+                fares = route_dict.get("fare_classes", {})
                 route_dict["fare_summary"] = fares if isinstance(fares, dict) else {}
-                
+
                 routes.append(route_dict)
 
             return {
@@ -951,42 +1012,77 @@ def execute_booking(
                 if not _table_exists(cur, "bookings"):
                     return False, "bookings table does not exist."
 
+                # Fetch the schedule's fare table in the same query we use to
+                # confirm the schedule exists (single round-trip, same cursor —
+                # avoids borrowing a second pool connection mid-transaction).
                 cur.execute(
                     """
-                    SELECT *
+                    SELECT fare_classes
                     FROM national_rail_schedules
                     WHERE schedule_id = %s
                     """,
                     (schedule_id,),
                 )
-                schedule = cur.fetchone()
+                schedule_row = cur.fetchone()
 
-                if not schedule:
+                if not schedule_row:
                     return False, f"Schedule {schedule_id} not found."
 
-                schedule = dict(schedule)
-                stops = _safe_json(schedule.get("stops_in_order"), [])
-
-                stops_upper = [str(s).upper() for s in stops]
                 origin = origin_station_id.upper()
                 destination = destination_station_id.upper()
 
-                if origin not in stops_upper or destination not in stops_upper:
+                # Validate stop order via the junction table.
+                cur.execute(
+                    """
+                    SELECT
+                        (SELECT stop_order
+                           FROM national_rail_schedule_stops
+                          WHERE schedule_id = %s AND station_id = %s) AS origin_order,
+                        (SELECT stop_order
+                           FROM national_rail_schedule_stops
+                          WHERE schedule_id = %s AND station_id = %s) AS destination_order
+                    """,
+                    (schedule_id, origin, schedule_id, destination),
+                )
+                orders = cur.fetchone()
+
+                if orders["origin_order"] is None or orders["destination_order"] is None:
                     return False, "Origin or destination is not served by this schedule."
 
-                origin_index = stops_upper.index(origin)
-                dest_index = stops_upper.index(destination)
-
-                if origin_index >= dest_index:
+                if orders["origin_order"] >= orders["destination_order"]:
                     return False, "Destination must come after origin on this schedule."
 
-                stops_travelled = dest_index - origin_index
-                fare = query_national_rail_fare(schedule_id, fare_class, stops_travelled)
+                stops_travelled = orders["destination_order"] - orders["origin_order"]
 
-                if "error" in fare:
-                    return False, fare["error"]
+                # Inline fare computation (same maths as query_national_rail_fare,
+                # executed on this cursor so booking + payment stay in ONE
+                # transaction on ONE connection).
+                fare_classes = _safe_json(schedule_row.get("fare_classes"), {})
+                if not isinstance(fare_classes, dict):
+                    fare_classes = {}
 
-                price = fare["total_fare_usd"]
+                class_info = (
+                    fare_classes.get(fare_class)
+                    or fare_classes.get(fare_class.capitalize())
+                    or fare_classes.get("standard")
+                    or {}
+                )
+                if not isinstance(class_info, dict):
+                    class_info = {}
+
+                base = _as_float(class_info.get("base_fare_usd"), 5.0)
+                per_stop = _as_float(class_info.get("per_stop_rate_usd"), 2.0)
+                price = round(base + max(stops_travelled, 0) * per_stop, 2)
+
+                fare = {
+                    "schedule_id": schedule_id,
+                    "fare_class": fare_class,
+                    "stops_travelled": stops_travelled,
+                    "base_fare_usd": base,
+                    "per_stop_rate_usd": per_stop,
+                    "total_fare_usd": price,
+                    "currency": "USD",
+                }
 
                 # Accept either globally unique seat_id or raw seat_no.
                 final_seat_id = seat_id
@@ -1075,6 +1171,32 @@ def execute_booking(
                 )
 
                 row = dict(cur.fetchone())
+
+                # Record the payment in the SAME transaction as the booking:
+                # the context manager commits once on exit, so a payment
+                # failure rolls the booking back too (no orphan bookings).
+                if _table_exists(cur, "payments"):
+                    payment_id = _gen_payment_id()
+                    cur.execute(
+                        """
+                        INSERT INTO payments (
+                            payment_id,
+                            booking_id,
+                            user_id,
+                            amount_usd,
+                            payment_method,
+                            payment_status,
+                            paid_at,
+                            created_at
+                        )
+                        VALUES (%s, %s, %s, %s, 'card', 'paid',
+                                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        RETURNING *
+                        """,
+                        (payment_id, booking_id, user_id, price),
+                    )
+                    row["payment"] = dict(cur.fetchone())
+
                 row["fare"] = fare
 
                 return True, row
@@ -1146,6 +1268,18 @@ def execute_cancellation(booking_id: str, user_id: str) -> tuple[bool, dict | st
                 )
 
                 updated = dict(cur.fetchone())
+
+                # Mark the payment refunded in the same transaction.
+                if refund > 0 and _table_exists(cur, "payments"):
+                    cur.execute(
+                        """
+                        UPDATE payments
+                        SET payment_status = 'refunded'
+                        WHERE booking_id = %s
+                          AND payment_status = 'paid'
+                        """,
+                        (booking_id,),
+                    )
 
                 return True, {
                     "booking": updated,

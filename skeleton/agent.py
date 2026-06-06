@@ -271,15 +271,8 @@ def _execute_tool(
                 result = {"error": "No metro service found between these stations."}
             else:
                 sched = schedules[0]
-                stops = sched.get("stops_in_order") or []
-
-                if isinstance(stops, str):
-                    stops = json.loads(stops)
-
-                try:
-                    n_stops = stops.index(params["destination_id"]) - stops.index(params["origin_id"])
-                except ValueError:
-                    n_stops = 1
+                # stops_travelled is computed by the junction-table query.
+                n_stops = int(sched.get("stops_travelled") or 1)
 
                 fare = query_metro_fare(sched["schedule_id"], n_stops)
 
