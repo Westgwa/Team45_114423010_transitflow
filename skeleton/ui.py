@@ -9,7 +9,12 @@ Students: You do NOT need to change this file.
 
 # TASK 6 EXTENSION: Added an analytics dashboard panel to surface booking revenue data.
 
+import csv
+import datetime
+import json
+import os
 import sys
+import tempfile
 sys.path.insert(0, ".")
 
 import gradio as gr
@@ -268,6 +273,83 @@ def get_booking_analytics(start_date: str, end_date: str):
     return render_booking_summary(summary)
 
 
+def _write_csv_file(prefix: str, headers: list[str], rows: list[list[str]]) -> str:
+    filename = f"transitflow_{prefix}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    path = os.path.join(tempfile.gettempdir(), filename)
+    with open(path, "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(headers)
+        writer.writerows(rows)
+    return path
+
+
+def export_booking_analytics(start_date: str, end_date: str):
+    summary = query_booking_revenue_summary(
+        start_date=start_date.strip() or None,
+        end_date=end_date.strip() or None,
+    )
+
+    if not summary:
+        return gr.update(value=None, visible=False), "No analytics data available to export."
+
+    headers = ["metric", "value"]
+    rows = [
+        ["Total bookings", summary.get("total_bookings", 0)],
+        ["Active bookings", summary.get("active_bookings", 0)],
+        ["Cancelled bookings", summary.get("cancelled_bookings", 0)],
+        ["Total revenue (USD)", f"{summary.get('total_revenue_usd', 0):.2f}"],
+        ["Total refunds (USD)", f"{summary.get('total_refunds_usd', 0):.2f}"],
+        ["Start date", summary.get("start_date") or "all"],
+        ["End date", summary.get("end_date") or "all"],
+    ]
+
+    path = _write_csv_file("analytics", headers, rows)
+    return gr.update(value=path, visible=True), f"Analytics report exported: {os.path.basename(path)}"
+
+
+def export_trip_history(user_email: str):
+    if not user_email:
+        return gr.update(value=None, visible=False), "Please log in to export your trip history."
+
+    history = query_trip_history(user_email, limit=1000)
+    if "error" in history:
+        return gr.update(value=None, visible=False), f"Error: {history.get('error')}"
+
+    trips = history.get("trips", [])
+    if not trips:
+        return gr.update(value=None, visible=False), "No trip history found to export."
+
+    headers = [
+        "booking_id", "schedule_id", "origin_station_id", "destination_station_id",
+        "travel_date", "fare_class", "seat_id", "ticket_type", "status",
+        "price_paid_usd", "refund_amount_usd", "booked_at", "cancelled_at",
+        "line", "service_type",
+    ]
+    rows = [
+        [
+            trip.get("booking_id", ""),
+            trip.get("schedule_id", ""),
+            trip.get("origin_station_id", ""),
+            trip.get("destination_station_id", ""),
+            trip.get("travel_date", ""),
+            trip.get("fare_class", ""),
+            trip.get("seat_id", ""),
+            trip.get("ticket_type", ""),
+            trip.get("status", ""),
+            f"{trip.get('price_paid_usd', 0):.2f}",
+            f"{trip.get('refund_amount_usd', 0):.2f}",
+            trip.get("booked_at", ""),
+            trip.get("cancelled_at", ""),
+            trip.get("line", ""),
+            trip.get("service_type", ""),
+        ]
+        for trip in trips
+    ]
+
+    path = _write_csv_file("trip_history", headers, rows)
+    return gr.update(value=path, visible=True), f"Trip history exported: {os.path.basename(path)}"
+
+
 def render_trip_history(user_email: str) -> str:
     """Format trip history into a markdown-friendly display."""
     if not user_email:
@@ -366,6 +448,69 @@ def render_route_visualization(origin: str, destination: str, route_type: str) -
             lines.append("")
 
     return "\n".join(lines)
+
+
+def render_route_visualization_graph(origin: str, destination: str, route_type: str) -> str:
+    if not origin or not destination:
+        return gr.update(value="<div style='color:#b91c1c; font-weight:bold;'>Please enter both origin and destination station IDs.</div>", visible=True)
+
+    route_data = query_route_visualization(origin.strip(), destination.strip(), route_type)
+    if "error" in route_data:
+        return gr.update(value=f"<div style='color:#b91c1c; font-weight:bold;'>Error: {route_data.get('error')}</div>", visible=True)
+
+    routes = route_data.get("routes", [])
+    if not routes:
+        return gr.update(value=f"<div style='color:#374151; font-weight:bold;'>No routes found from {origin} to {destination}.</div>", visible=True)
+
+    route = routes[0]
+    nodes = []
+    edges = []
+    for idx, stop in enumerate(route.get("stops_detail", [])):
+        nodes.append({
+            "id": idx,
+            "label": f"{idx + 1}. {stop.get('station_id', 'UNKNOWN')}",
+            "title": f"{stop.get('station_id', 'UNKNOWN')}\n{stop.get('travel_time_min', 0)} min from origin",
+            "shape": "box",
+        })
+        if idx > 0:
+            edges.append({
+                "from": idx - 1,
+                "to": idx,
+                "label": f"{stop.get('travel_time_min', 0)} min",
+                "arrows": "to",
+                "font": {"align": "middle"},
+            })
+
+    graph_html = """
+<div style='padding:0.75rem; border:1px solid #d1d5db; border-radius:0.75rem; margin-bottom:0.75rem; background:#f8fafc;'>
+  <strong>Graph View</strong><br>
+  Line: %s · Type: %s · Schedule: %s
+</div>
+<div id='route-graph' style='height:380px; border:1px solid #d1d5db; border-radius:0.75rem;'></div>
+<script type='text/javascript' src='https://unpkg.com/vis-network@9.1.2/dist/vis-network.min.js'></script>
+<script type='text/javascript'>
+  const container = document.getElementById('route-graph');
+  const nodes = new vis.DataSet(%s);
+  const edges = new vis.DataSet(%s);
+  const data = {nodes: nodes, edges: edges};
+  const options = {
+    layout: {hierarchical: false},
+    edges: {smooth: {type: 'cubicBezier', roundness: 0.4}, arrowStrikethrough: false},
+    nodes: {shape: 'box', margin: 10, font: {multi: 'html'}},
+    physics: {enabled: true, stabilization: true, barnesHut: {gravitationalConstant: -3000}},
+    interaction: {hover: true, zoomView: true, dragView: true},
+  };
+  new vis.Network(container, data, options);
+</script>
+    """ % (
+        route.get('line', 'N/A'),
+        route.get('service_type', 'N/A'),
+        route.get('schedule_id', 'N/A'),
+        json.dumps(nodes),
+        json.dumps(edges),
+    )
+
+    return gr.update(value=graph_html, visible=True)
 
 
 # ── Panel visibility toggles ──────────────────────────────────────────────────
@@ -499,12 +644,63 @@ with gr.Blocks(title="TransitFlow") as demo:
             analytics_start_date = gr.Textbox(label="Start date", placeholder="YYYY-MM-DD")
             analytics_end_date = gr.Textbox(label="End date", placeholder="YYYY-MM-DD")
             analytics_button = gr.Button("Refresh booking analytics", variant="primary", size="sm")
+            analytics_export_button = gr.Button("Export analytics CSV", variant="secondary", size="sm")
             analytics_output = gr.Markdown(value="No analytics data loaded yet.")
+            analytics_export_message = gr.Markdown(value="", visible=True)
+            analytics_export_file = gr.File(label="Download analytics CSV", visible=False)
 
             gr.Markdown("---")
-            gr.Markdown("### 🛫 Trip History")
+            gr.Markdown("### � Live Notifications")
+            notification_panel = gr.HTML(
+                """
+                <div id='notification-area' style='min-height:130px; background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:10px; overflow:auto; font-size:0.95rem;'>
+                    <div style='color:#6a737d; font-style:italic;'>Connecting to the real-time notification server...</div>
+                </div>
+                <script>
+                (function() {
+                    const area = document.getElementById('notification-area');
+                    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                    const url = protocol + '://' + window.location.host + '/ws/notifications';
+                    let ws = null;
+
+                    const addMessage = (text) => {
+                        const line = document.createElement('div');
+                        line.textContent = text;
+                        line.style.padding = '4px 0';
+                        area.prepend(line);
+                        while (area.childNodes.length > 10) {
+                            area.removeChild(area.lastChild);
+                        }
+                    };
+
+                    const connect = () => {
+                        ws = new WebSocket(url);
+                        ws.addEventListener('open', () => addMessage('🔔 Connected to live notifications.'));
+                        ws.addEventListener('message', (event) => {
+                            try {
+                                const payload = JSON.parse(event.data);
+                                addMessage(payload.message || event.data);
+                            } catch (error) {
+                                addMessage(event.data);
+                            }
+                        });
+                        ws.addEventListener('close', () => addMessage('⚠️ Notification connection closed. Refresh the page to retry.'));
+                        ws.addEventListener('error', () => addMessage('⚠️ Notification connection error.'));
+                    };
+
+                    connect();
+                })();
+                </script>
+                """
+            )
+
+            gr.Markdown("---")
+            gr.Markdown("### �🛫 Trip History")
             trip_history_button = gr.Button("Load my trip history", variant="primary", size="sm")
+            trip_history_export_button = gr.Button("Export trip history CSV", variant="secondary", size="sm")
             trip_history_output = gr.Markdown(value="Log in to view your trips.")
+            trip_history_export_message = gr.Markdown(value="", visible=True)
+            trip_history_export_file = gr.File(label="Download trip history CSV", visible=False)
 
             gr.Markdown("---")
             gr.Markdown("### 🗺️ Route Visualizer")
@@ -517,6 +713,7 @@ with gr.Blocks(title="TransitFlow") as demo:
             )
             route_visualize_button = gr.Button("Visualize Route", variant="primary", size="sm")
             route_output = gr.Markdown(value="Enter stations and select route type to visualize.")
+            route_graph_html = gr.HTML(value="", visible=False)
 
             gr.Markdown("---")
             gr.Markdown("### �💡 Try these examples")
@@ -552,16 +749,34 @@ with gr.Blocks(title="TransitFlow") as demo:
         outputs=[analytics_output],
     )
 
+    analytics_export_button.click(
+        fn=export_booking_analytics,
+        inputs=[analytics_start_date, analytics_end_date],
+        outputs=[analytics_export_file, analytics_export_message],
+    )
+
     trip_history_button.click(
         fn=render_trip_history,
         inputs=[current_user_state],
         outputs=[trip_history_output],
     )
 
+    trip_history_export_button.click(
+        fn=export_trip_history,
+        inputs=[current_user_state],
+        outputs=[trip_history_export_file, trip_history_export_message],
+    )
+
     route_visualize_button.click(
         fn=render_route_visualization,
         inputs=[route_origin, route_destination, route_type_dropdown],
         outputs=[route_output],
+    )
+
+    route_visualize_button.click(
+        fn=render_route_visualization_graph,
+        inputs=[route_origin, route_destination, route_type_dropdown],
+        outputs=[route_graph_html],
     )
 
     clear_btn.click(
@@ -665,9 +880,6 @@ with gr.Blocks(title="TransitFlow") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        theme=gr.themes.Soft(),
-    )
+    from skeleton.server import run
+
+    run()

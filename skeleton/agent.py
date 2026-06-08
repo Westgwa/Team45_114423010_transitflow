@@ -6,6 +6,7 @@ from datetime import date
 from typing import Optional
 
 from skeleton.llm_provider import llm
+from skeleton.notifications import notifications
 from databases.relational.queries import (
     query_national_rail_availability,
     query_national_rail_fare,
@@ -313,6 +314,18 @@ def _execute_tool(
                 ticket_type=params.get("ticket_type", "single"),
             )
 
+            if ok:
+                notifications.notify({
+                    "type": "booking",
+                    "message": (
+                        f"🔔 Booking confirmed: {data.get('booking_id')} on {data.get('schedule_id')} "
+                        f"for {data.get('travel_date')}."
+                    ),
+                    "booking_id": data.get("booking_id"),
+                    "schedule_id": data.get("schedule_id"),
+                    "travel_date": data.get("travel_date"),
+                })
+
             result = data if ok else {"error": data}
 
         elif tool_name == "cancel_booking":
@@ -328,6 +341,18 @@ def _execute_tool(
                 booking_id=params["booking_id"],
                 user_id=profile["user_id"],
             )
+
+            if ok:
+                booking = data.get("booking", {}) if isinstance(data, dict) else {}
+                notifications.notify({
+                    "type": "cancellation",
+                    "message": (
+                        f"⚠️ Booking cancelled: {booking.get('booking_id', params['booking_id'])}. "
+                        f"Refund: ${data.get('refund_amount_usd', 0):.2f}."
+                    ),
+                    "booking_id": booking.get("booking_id", params["booking_id"]),
+                    "refund_amount_usd": data.get("refund_amount_usd", 0),
+                })
 
             result = data if ok else {"error": data}
 
