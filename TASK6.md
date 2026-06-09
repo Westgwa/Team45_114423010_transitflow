@@ -24,6 +24,35 @@ This file documents every file modified or added for the bonus extension.
   - Database tables referenced: `bookings`, `national_rail_schedules`, `metro_schedules`.
   - Purpose: retrieve detailed trip history and route information for logged-in users and route planning.
 
+- `requirements.txt`
+  - Added `fastapi`, `uvicorn`, and `websockets` dependencies.
+  - Purpose: support the FastAPI/uvicorn server and the WebSocket real-time notification channel.
+
+- `skeleton/notifications.py`
+  - Added as a new file containing the `NotificationManager` class and a shared `notifications` singleton.
+  - Manages a set of connected WebSocket clients (thread-safe), exposes a `websocket_endpoint` handler, a `broadcast` coroutine, and a `notify` method that schedules broadcasts onto the server event loop from worker threads.
+  - Purpose: push real-time booking and cancellation notifications to all connected browsers.
+
+- `skeleton/server.py`
+  - Added as a new file that builds a FastAPI application, mounts the Gradio UI at `/`, and registers the `/ws/notifications` WebSocket endpoint.
+  - Captures the running event loop on startup so background notifications can be dispatched, and exposes a `run()` entry point served by uvicorn (default port 7860).
+  - Purpose: serve the Gradio UI and the live-notification WebSocket from a single ASGI server.
+
+- `skeleton/agent.py`
+  - Added an import of the `notifications` singleton.
+  - After a successful `create_booking`, emits a `booking` notification (booking id, schedule id, travel date).
+  - After a successful `cancel_booking`, emits a `cancellation` notification (booking id, refund amount).
+  - Purpose: trigger real-time notifications when bookings are created or cancelled through the agent.
+
+- `skeleton/ui.py` (bonus-items additions on top of the earlier Task 6 work)
+  - Added `_write_csv_file()` helper plus `export_booking_analytics()` and `export_trip_history()` to generate downloadable CSV reports.
+  - Added "Export analytics CSV" and "Export trip history CSV" buttons with file-download outputs.
+  - Added `render_route_visualization_graph()`, which renders the route as an interactive node graph using vis-network, and wired it to the "Visualize Route" button alongside the existing text view.
+  - Added a "Live Notifications" panel that opens a WebSocket to `/ws/notifications` and displays incoming booking/cancellation messages in real time.
+  - Changed the `__main__` entry point to launch via `skeleton/server.py` (FastAPI + uvicorn) instead of `demo.launch()`.
+  - Database tables referenced (indirectly via queries): `bookings`, `national_rail_schedules`, `metro_schedules`.
+  - Purpose: add CSV export, graphical route visualization, and real-time notifications to the dashboard.
+
 - `DESIGN_DOCUMENT.md`
   - Added Section 7 describing the motivation, changes, example queries, and testing evidence for this extension.
 
