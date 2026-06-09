@@ -2,6 +2,7 @@
 
 import asyncio
 
+import gradio as gr
 import uvicorn
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,8 +19,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/", demo.app)
-
 
 @app.websocket("/ws/notifications")
 async def websocket_notifications(websocket: WebSocket):
@@ -29,6 +28,13 @@ async def websocket_notifications(websocket: WebSocket):
 @app.on_event("startup")
 async def startup_event():
     notifications.set_loop(asyncio.get_running_loop())
+
+
+# Mount the Gradio UI at "/" using Gradio's helper. This must be done LAST so the
+# explicit /ws/notifications route above is matched before Gradio's catch-all, and
+# so Gradio's blocks/config are initialised (a raw app.mount("/", demo.app) leaves
+# config unset, which makes the index template render fail with a 500).
+app = gr.mount_gradio_app(app, demo, path="/")
 
 
 def run(host: str = "0.0.0.0", port: int = 7860) -> None:
