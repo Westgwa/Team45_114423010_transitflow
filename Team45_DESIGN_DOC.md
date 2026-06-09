@@ -320,6 +320,48 @@ This extension is intentionally database-focused, because database extensions ar
   - `TASK6.md` listing all modified files and functions for the bonus requirement.
   - `Team45_DESIGN_DOC.md` containing Section 7 for motivation, changes, example queries, and testing evidence.
 
+**Real-Time, Export, and Visualization Layer (second iteration):**
+
+A second iteration of the extension builds on the analytics queries above and turns the
+read-only dashboard into an interactive, real-time tool. The motivation is to surface the
+same data in ways the chat interface cannot: downloadable reports, a live event feed, and a
+graphical route map. These changes are UI- and infrastructure-focused and reuse the database
+queries already added above.
+
+- **CSV export** (`skeleton/ui.py`):
+  - `_write_csv_file(prefix, headers, rows) -> str` — shared helper that writes a timestamped
+    CSV into the system temp directory and returns the path for download.
+  - `export_booking_analytics(start_date, end_date)` — exports the
+    `query_booking_revenue_summary` metrics as a downloadable CSV; wired to an
+    "Export analytics CSV" button.
+  - `export_trip_history(user_email)` — exports the logged-in user's full
+    `query_trip_history` (up to 1000 trips) as a downloadable CSV; wired to an
+    "Export trip history CSV" button.
+
+- **Interactive route graph** (`skeleton/ui.py`):
+  - `render_route_visualization_graph(origin, destination, route_type)` — converts the
+    `query_route_visualization` result into vis-network nodes and edges and renders an
+    interactive, draggable/zoomable graph of the route's stops (with per-leg travel times),
+    shown alongside the existing text route view via the "Visualize Route" button.
+
+- **Real-time notifications** (`skeleton/notifications.py`, `skeleton/agent.py`, `skeleton/ui.py`):
+  - `skeleton/notifications.py` (new) — `NotificationManager` maintains a thread-safe set of
+    connected WebSocket clients and exposes `websocket_endpoint`, `broadcast`, and a
+    thread-safe `notify` that schedules a broadcast onto the server event loop. A module-level
+    `notifications` singleton is shared across the app.
+  - `skeleton/agent.py` — after a successful `create_booking` or `cancel_booking`, calls
+    `notifications.notify(...)` with a booking or cancellation payload (booking id, schedule,
+    travel date, or refund amount).
+  - `skeleton/ui.py` — adds a "Live Notifications" panel whose JavaScript opens a WebSocket to
+    `/ws/notifications` and prepends each incoming event to the feed in real time.
+
+- **Application server** (`skeleton/server.py`, `requirements.txt`):
+  - `skeleton/server.py` (new) — builds a FastAPI app, mounts the Gradio UI at `/`, registers
+    the `/ws/notifications` WebSocket endpoint, captures the running event loop on startup so
+    background notifications can be dispatched, and serves everything through uvicorn. The
+    `__main__` block of `skeleton/ui.py` now launches via this server.
+  - `requirements.txt` — adds `fastapi`, `uvicorn`, and `websockets`.
+
 ### 7.3 Example Queries
 
 **Analytics (Operational):**
@@ -358,13 +400,22 @@ The returned data can be used directly by dashboards or by the AI agent to suppo
 - "Show me metro routes to station MS10"
 - "What are the fare classes for the NR01-NR05 route?"
 
+**Real-time, export, and visualization interactions:**
+- Click "Export analytics CSV" → downloads a timestamped CSV of the booking revenue summary.
+- Log in, then click "Export trip history CSV" → downloads the user's full trip history as CSV.
+- Enter origin/destination and click "Visualize Route" → renders an interactive node graph of the route's stops.
+- Make or cancel a booking through the agent → a live notification appears instantly in the "Live Notifications" panel of every open browser, pushed over the `/ws/notifications` WebSocket.
+
 ### 7.4 Testing Evidence
 
 Verification steps performed during development:
 
-1. Confirmed the new function is syntactically valid and integrated into the existing relational queries module.
-2. Verified that `databases/relational/queries.py` contains the required `# TASK 6 EXTENSION:` marker near the top.
-3. Confirmed the new function can run against the existing `bookings` table using the current PostgreSQL schema and returns correct aggregated metrics.
-4. Added root-level `TASK6.md` to satisfy the bonus requirement for a file list and modified-file tracking.
+1. Confirmed the new database functions are syntactically valid and integrated into the existing relational queries module.
+2. Verified that every modified file carries the required `# TASK 6 EXTENSION:` marker near the top: `databases/relational/queries.py`, `skeleton/ui.py`, `skeleton/agent.py`, `skeleton/notifications.py`, and `skeleton/server.py`.
+3. Confirmed `query_booking_revenue_summary` runs against the existing `bookings` table using the current PostgreSQL schema and returns correct aggregated metrics.
+4. Compiled all changed modules (`skeleton/agent.py`, `skeleton/notifications.py`, `skeleton/server.py`, `skeleton/ui.py`) with no syntax errors.
+5. Imported `skeleton.server` and confirmed the FastAPI application builds successfully with the `/ws/notifications` WebSocket route registered, verifying the Gradio UI mounts and the notification endpoint is wired correctly.
+6. Confirmed the required dependencies (`fastapi`, `uvicorn`, `websockets`) are present in `requirements.txt` and installed in the environment.
+7. Added root-level `TASK6.md` listing all modified/added files with their specific functions and tables, to satisfy the bonus tracking requirement.
 
-The new query is intentionally simple and compatible with the current schema, which minimizes risk while adding a meaningful new database capability.
+The database queries remain compatible with the current schema, and the real-time/export/visualization layer is additive — it introduces new UI panels and a server entry point without altering existing query behaviour, minimizing regression risk while adding meaningful new capabilities.

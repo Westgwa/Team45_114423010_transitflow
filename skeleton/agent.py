@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# TASK 6 EXTENSION: Emits real-time booking/cancellation notifications via the NotificationManager.
+
 import json
 import re
 from datetime import date

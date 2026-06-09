@@ -1,3 +1,5 @@
+# TASK 6 EXTENSION: New file. FastAPI/uvicorn server that hosts the Gradio UI and the /ws/notifications WebSocket endpoint.
+
 import asyncio
 
 import uvicorn

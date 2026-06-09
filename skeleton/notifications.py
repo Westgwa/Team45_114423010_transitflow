@@ -1,3 +1,5 @@
+# TASK 6 EXTENSION: New file. WebSocket NotificationManager that broadcasts live booking/cancellation events to connected browsers.
+
 import asyncio
 import json
 import threading
