@@ -136,6 +136,22 @@ def _table_exists(cur, table_name: str) -> bool:
     return bool(row[0])
 
 
+def _view_exists(cur, view_name: str) -> bool:
+    # TASK 6 EXTENSION: lets query_booking_revenue_summary prefer the
+    # vw_booking_revenue_daily rollup view when present, and fall back to the
+    # base bookings table on databases where the view was not created.
+    cur.execute(
+        """
+        SELECT 1
+        FROM information_schema.views
+        WHERE table_schema = 'public'
+          AND table_name = %s
+        """,
+        (view_name,),
+    )
+    return cur.fetchone() is not None
+
+
 def _column_exists(cur, table_name: str, column_name: str) -> bool:
     cur.execute(
         """
@@ -291,17 +307,34 @@ def query_booking_revenue_summary(
     """
     with get_db_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            # Filter the query by date range when provided, otherwise include all rows.
-            sql = """
-                SELECT
-                    COUNT(*) AS total_bookings,
-                    COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) NOT IN ('cancelled', 'canceled')) AS active_bookings,
-                    COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) IN ('cancelled', 'canceled')) AS cancelled_bookings,
-                    COALESCE(SUM(price_paid_usd), 0) AS total_revenue_usd,
-                    COALESCE(SUM(refund_amount_usd), 0) AS total_refunds_usd
-                FROM bookings
-                WHERE 1=1
-            """
+            # Read from the vw_booking_revenue_daily rollup view (TASK 6 EXTENSION):
+            # the per-day aggregation already lives in the schema, so here we only
+            # SUM the days that fall inside the requested range. Fall back to the
+            # raw bookings table if the view has not been created (older DBs).
+            source = "vw_booking_revenue_daily" if _view_exists(cur, "vw_booking_revenue_daily") else "bookings"
+
+            if source == "vw_booking_revenue_daily":
+                sql = """
+                    SELECT
+                        COALESCE(SUM(total_bookings), 0)     AS total_bookings,
+                        COALESCE(SUM(active_bookings), 0)     AS active_bookings,
+                        COALESCE(SUM(cancelled_bookings), 0)  AS cancelled_bookings,
+                        COALESCE(SUM(revenue_usd), 0)         AS total_revenue_usd,
+                        COALESCE(SUM(refunds_usd), 0)         AS total_refunds_usd
+                    FROM vw_booking_revenue_daily
+                    WHERE 1=1
+                """
+            else:
+                sql = """
+                    SELECT
+                        COUNT(*) AS total_bookings,
+                        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) NOT IN ('cancelled', 'canceled')) AS active_bookings,
+                        COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) IN ('cancelled', 'canceled')) AS cancelled_bookings,
+                        COALESCE(SUM(price_paid_usd), 0) AS total_revenue_usd,
+                        COALESCE(SUM(refund_amount_usd), 0) AS total_refunds_usd
+                    FROM bookings
+                    WHERE 1=1
+                """
 
             params: list[str] = []
 
@@ -317,10 +350,12 @@ def query_booking_revenue_summary(
             record = cur.fetchone()
 
             # Return a clear JSON object for downstream tools or dashboards.
+            # Counts are cast to int: summing the view's per-day counts yields a
+            # NUMERIC (psycopg2 Decimal), so cast back to plain integers.
             return {
-                "total_bookings": record["total_bookings"],
-                "active_bookings": record["active_bookings"],
-                "cancelled_bookings": record["cancelled_bookings"],
+                "total_bookings": int(record["total_bookings"] or 0),
+                "active_bookings": int(record["active_bookings"] or 0),
+                "cancelled_bookings": int(record["cancelled_bookings"] or 0),
                 "total_revenue_usd": float(record["total_revenue_usd"] or 0),
                 "total_refunds_usd": float(record["total_refunds_usd"] or 0),
                 "start_date": start_date,

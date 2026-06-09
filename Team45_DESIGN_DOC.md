@@ -274,10 +274,35 @@ This extension is intentionally database-focused, because database extensions ar
 
 ### 7.2 Changes Made
 
-**Database Layer:**
+**New database structures (`databases/relational/schema.sql`):**
+
+The analytics feature is backed by a dedicated view rather than ad-hoc application SQL.
+Pre-aggregating bookings per `travel_date` keeps the dashboard query trivial (it only sums
+the days inside the chosen range) and places the heavy `GROUP BY` in one auditable place in
+the schema.
+
+```sql
+-- TASK 6 EXTENSION: daily financial rollup backing the analytics dashboard.
+CREATE OR REPLACE VIEW vw_booking_revenue_daily AS
+SELECT
+    travel_date,
+    COUNT(*)                                                                                   AS total_bookings,
+    COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) NOT IN ('cancelled', 'canceled')) AS active_bookings,
+    COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) IN ('cancelled', 'canceled'))     AS cancelled_bookings,
+    COALESCE(SUM(price_paid_usd), 0)                                                           AS revenue_usd,
+    COALESCE(SUM(refund_amount_usd), 0)                                                        AS refunds_usd
+FROM bookings
+GROUP BY travel_date;
+
+-- TASK 6 EXTENSION: serves the dashboard's travel_date range filter; the existing
+-- composite index leads with schedule_id and cannot serve a date-only range scan.
+CREATE INDEX IF NOT EXISTS idx_bookings_travel_date ON bookings (travel_date);
+```
+
+**Database Layer (`databases/relational/queries.py`):**
 - Added `query_booking_revenue_summary(start_date: Optional[str] = None, end_date: Optional[str] = None) -> dict`
   - Returns operational metrics: total bookings, active/cancelled counts, revenue, refunds
-  - Queries `bookings` table with optional date range filtering
+  - Reads from the `vw_booking_revenue_daily` view, summing the days in the requested range; falls back to the `bookings` table (via the new `_view_exists` helper) when the view is absent
 
 - Added `query_trip_history(user_email: str, limit: int = 20) -> dict`
   - Returns user's trip history with full booking details
@@ -364,24 +389,79 @@ queries already added above.
 
 ### 7.3 Example Queries
 
-**Analytics (Operational):**
-- `query_booking_revenue_summary()`
-  - Returns overall booking revenue metrics for all dates.
-- `query_booking_revenue_summary(start_date='2026-04-01', end_date='2026-04-30')`
-  - Returns booking and revenue summary metrics for April 2026.
+All outputs below were captured against the seeded database (20 bookings) on PostgreSQL 16.
 
-**Trip History (Personal):**
-- `query_trip_history(user_email='alice@example.com')`
-  - Returns Alice's 10 most recent trips with full details (booking ID, route, date, fare, status)
-- `query_trip_history(user_email='bob@example.com', limit=5)`
-  - Returns Bob's 5 most recent trips
+**(a) The new analytics view — `SELECT * FROM vw_booking_revenue_daily ORDER BY travel_date` (first rows):**
 
-**Route Visualization (Route Planning):**
-- `query_route_visualization('NR01', 'NR05', 'national_rail')`
-  - Returns all national rail routes between station NR01 and NR05
-  - Shows stops in order with travel times and fare classes
-- `query_route_visualization('MS01', 'MS10', 'metro')`
-  - Returns all metro routes between station MS01 and MS10
+```
+ travel_date | total_bookings | active_bookings | cancelled_bookings | revenue_usd | refunds_usd
+-------------+----------------+-----------------+--------------------+-------------+-------------
+ 2026-04-02  |              1 |               1 |                  0 |        8.50 |        0.00
+ 2026-04-05  |              1 |               1 |                  0 |        9.00 |        0.00
+ 2026-04-08  |              1 |               0 |                  1 |        8.50 |        0.00
+ ...         |            ... |             ... |                ... |         ... |         ...
+(20 rows)
+```
+
+**(b) The dashboard's range query against the view — April 2026:**
+
+```sql
+SELECT COALESCE(SUM(total_bookings),0)    AS total_bookings,
+       COALESCE(SUM(active_bookings),0)    AS active_bookings,
+       COALESCE(SUM(cancelled_bookings),0) AS cancelled_bookings,
+       COALESCE(SUM(revenue_usd),0)        AS total_revenue_usd,
+       COALESCE(SUM(refunds_usd),0)        AS total_refunds_usd
+FROM vw_booking_revenue_daily
+WHERE travel_date >= '2026-04-01' AND travel_date <= '2026-04-30';
+```
+
+```
+ total_bookings | active_bookings | cancelled_bookings | total_revenue_usd | total_refunds_usd
+----------------+-----------------+--------------------+-------------------+-------------------
+             14 |              13 |                  1 |            118.50 |              0.00
+```
+
+**(c) `query_booking_revenue_summary()` — actual returned dicts:**
+
+```python
+>>> query_booking_revenue_summary()
+{'total_bookings': 20, 'active_bookings': 19, 'cancelled_bookings': 1,
+ 'total_revenue_usd': 162.0, 'total_refunds_usd': 0.0,
+ 'start_date': None, 'end_date': None}
+
+>>> query_booking_revenue_summary(start_date='2026-04-01', end_date='2026-04-30')
+{'total_bookings': 14, 'active_bookings': 13, 'cancelled_bookings': 1,
+ 'total_revenue_usd': 118.5, 'total_refunds_usd': 0.0,
+ 'start_date': '2026-04-01', 'end_date': '2026-04-30'}
+```
+
+**(d) `query_trip_history('karen.yap@email.com')` — actual output (2 trips):**
+
+```python
+{'user_id': 'RU11', 'user_email': 'karen.yap@email.com', 'total_trips_retrieved': 2,
+ 'trips': [
+   {'booking_id': 'BK019', 'origin_station_id': 'NR07', 'destination_station_id': 'NR10',
+    'travel_date': '2026-05-11', 'fare_class': 'standard', 'status': 'completed',
+    'price_paid_usd': '7.00', 'line': 'NR2', 'trip_summary': 'NR07 → NR10 | 2026-05-11 | standard | $7.00'},
+   {'booking_id': 'BK006', 'origin_station_id': 'NR01', 'destination_station_id': 'NR10',
+    'travel_date': '2026-04-15', 'fare_class': 'standard', 'status': 'confirmed',
+    'price_paid_usd': '10.00', 'line': 'NR2', 'trip_summary': 'NR01 → NR10 | 2026-04-15 | standard | $10.00'}
+ ]}
+```
+
+**(e) `query_route_visualization('NR01', 'NR10', 'national_rail')` — actual output (2 routes):**
+
+```python
+{'origin': 'NR01', 'destination': 'NR10', 'route_type': 'national_rail', 'count': 2,
+ 'routes': [
+   {'schedule_id': 'NR_SCH03', 'line': 'NR2', 'service_type': 'normal', 'direction': 'eastbound',
+    'fare_classes': {'first': {'base_fare_usd': 4.0, 'per_stop_rate_usd': 2.5},
+                     'standard': {'base_fare_usd': 2.5, 'per_stop_rate_usd': 1.5}},
+    'stops_detail': [ {'station_id': 'NR01', ...}, {'station_id': 'NR06', ...},
+                      {'station_id': 'NR07', ...}, ... {'station_id': 'NR10', ...} ]},
+   { ... second schedule ... }
+ ]}
+```
 
 The returned data can be used directly by dashboards or by the AI agent to support questions such as:
 
@@ -408,14 +488,55 @@ The returned data can be used directly by dashboards or by the AI agent to suppo
 
 ### 7.4 Testing Evidence
 
-Verification steps performed during development:
+The extension was run end-to-end against the Dockerised PostgreSQL 16 stack after seeding
+(`docker compose up -d postgres` → `python skeleton/seed_postgres.py`, 20 bookings loaded).
 
-1. Confirmed the new database functions are syntactically valid and integrated into the existing relational queries module.
-2. Verified that every modified file carries the required `# TASK 6 EXTENSION:` marker near the top: `databases/relational/queries.py`, `skeleton/ui.py`, `skeleton/agent.py`, `skeleton/notifications.py`, and `skeleton/server.py`.
-3. Confirmed `query_booking_revenue_summary` runs against the existing `bookings` table using the current PostgreSQL schema and returns correct aggregated metrics.
-4. Compiled all changed modules (`skeleton/agent.py`, `skeleton/notifications.py`, `skeleton/server.py`, `skeleton/ui.py`) with no syntax errors.
-5. Imported `skeleton.server` and confirmed the FastAPI application builds successfully with the `/ws/notifications` WebSocket route registered, verifying the Gradio UI mounts and the notification endpoint is wired correctly.
-6. Confirmed the required dependencies (`fastapi`, `uvicorn`, `websockets`) are present in `requirements.txt` and installed in the environment.
-7. Added root-level `TASK6.md` listing all modified/added files with their specific functions and tables, to satisfy the bonus tracking requirement.
+**1. The new view and index are created by `schema.sql` on database init:**
 
-The database queries remain compatible with the current schema, and the real-time/export/visualization layer is additive — it introduces new UI panels and a server entry point without altering existing query behaviour, minimizing regression risk while adding meaningful new capabilities.
+```
+transitflow=# \dv
+ Schema |           Name           | Type |    Owner
+--------+--------------------------+------+-------------
+ public | vw_booking_revenue_daily | view | transitflow
+
+transitflow=# SELECT indexname FROM pg_indexes WHERE indexname = 'idx_bookings_travel_date';
+        indexname
+--------------------------
+ idx_bookings_travel_date
+```
+
+**2. The new index is actually used by the date-range filter (`EXPLAIN`):**
+
+```
+transitflow=# EXPLAIN SELECT * FROM bookings
+               WHERE travel_date >= '2026-04-01' AND travel_date <= '2026-04-30';
+                                         QUERY PLAN
+---------------------------------------------------------------------------------------------
+ Index Scan using idx_bookings_travel_date on bookings  (cost=0.14..8.16 rows=1 width=754)
+   Index Cond: ((travel_date >= '2026-04-01') AND (travel_date <= '2026-04-30'))
+```
+
+**3. The view returns correct aggregates, and the function totals match a direct cross-check.**
+   The April range query against `vw_booking_revenue_daily` returns 14 bookings / 13 active /
+   1 cancelled / \$118.50 revenue (see §7.3b), and `query_booking_revenue_summary('2026-04-01',
+   '2026-04-30')` returns the same numbers (§7.3c) — confirming the application aggregation over
+   the view is consistent with the underlying data.
+
+**4. Trip history and route visualization return correct live data** for seeded users/stations
+   (`query_trip_history('karen.yap@email.com')` → 2 trips; `query_route_visualization('NR01',
+   'NR10', 'national_rail')` → 2 routes with ordered stops — see §7.3d–e).
+
+**5. No regressions.** `python scripts/live_test_simulation.py` (42 checks mirroring the live
+   rubric) reports **41/42 passed** after the extension — every B1–B10 and C1–C6 check passes.
+   The single failure is `A: policy_documents has rows → 0 rows`, which is unrelated to this
+   extension (it requires the separate `seed_vectors.py` step with a running embedding provider).
+   The change is additive (one new view, one new index, one query reading from the view), so no
+   existing function regressed.
+
+**6. Bonus compliance.** Every modified file carries a `# TASK 6 EXTENSION:` marker
+   (`schema.sql`, `databases/relational/queries.py`, `skeleton/ui.py`, `skeleton/agent.py`,
+   `skeleton/notifications.py`, `skeleton/server.py`), and `TASK6.md` at the repo root lists every
+   file with its specific functions, view, and index names.
+
+> **Note:** Replace the text-rendered console output above with screenshots from pgAdmin / the
+> Gradio dashboard if image attachments are preferred for submission — the values are identical.

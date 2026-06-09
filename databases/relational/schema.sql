@@ -3,6 +3,9 @@
 -- PostgreSQL + pgvector
 -- ============================================================
 
+-- TASK 6 EXTENSION: adds the vw_booking_revenue_daily analytics view and a
+-- supporting travel_date index near the end of this file (see section 6b).
+
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -391,6 +394,31 @@ ON bookings (seat_id);
 
 CREATE INDEX IF NOT EXISTS idx_bookings_user_date
 ON bookings (user_id, travel_date);
+
+-- ============================================================
+-- 6b. Booking analytics — TASK 6 EXTENSION
+-- ============================================================
+-- TASK 6 EXTENSION: A daily financial rollup view that backs the booking
+-- analytics dashboard. Pre-aggregating per travel_date keeps the dashboard
+-- query simple (the application only SUMs the days inside the chosen range)
+-- and means the heavy GROUP BY lives in one auditable place in the schema
+-- rather than being re-expressed in application SQL.
+CREATE OR REPLACE VIEW vw_booking_revenue_daily AS
+SELECT
+    travel_date,
+    COUNT(*)                                                                                   AS total_bookings,
+    COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) NOT IN ('cancelled', 'canceled')) AS active_bookings,
+    COUNT(*) FILTER (WHERE LOWER(COALESCE(status, 'active')) IN ('cancelled', 'canceled'))     AS cancelled_bookings,
+    COALESCE(SUM(price_paid_usd), 0)                                                           AS revenue_usd,
+    COALESCE(SUM(refund_amount_usd), 0)                                                        AS refunds_usd
+FROM bookings
+GROUP BY travel_date;
+
+-- TASK 6 EXTENSION: supports the date-range filter the analytics dashboard
+-- applies on travel_date (the existing composite index leads with
+-- schedule_id, so it cannot serve a travel_date-only range scan).
+CREATE INDEX IF NOT EXISTS idx_bookings_travel_date
+ON bookings (travel_date);
 
 
 -- ============================================================

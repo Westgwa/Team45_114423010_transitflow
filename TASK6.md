@@ -2,11 +2,19 @@
 
 This file documents every file modified or added for the bonus extension.
 
+- `databases/relational/schema.sql`
+  - Added `-- TASK 6 EXTENSION:` markers near the top and at section "6b. Booking analytics".
+  - Added the `vw_booking_revenue_daily` view: a per-`travel_date` rollup of booking counts, active/cancelled counts, revenue, and refunds over the `bookings` table.
+  - Added the `idx_bookings_travel_date` index to support the analytics date-range filter.
+  - Database objects added: view `vw_booking_revenue_daily`, index `idx_bookings_travel_date`.
+  - Purpose: introduce a dedicated analytics database structure that backs the booking-revenue dashboard.
+
 - `databases/relational/queries.py`
   - Added `# TASK 6 EXTENSION:` marker near the top.
-  - Added the `query_booking_revenue_summary` function.
-  - Database tables referenced: `bookings`.
-  - Purpose: add a new analytics database operation for booking revenue, cancellation, and refund metrics.
+  - Added the `query_booking_revenue_summary` function, which now reads from the `vw_booking_revenue_daily` view (with a fallback to the `bookings` table when the view is absent).
+  - Added the `_view_exists` helper used to select the view-or-table source.
+  - Database objects referenced: view `vw_booking_revenue_daily`, table `bookings`.
+  - Purpose: add a new analytics database operation for booking revenue, cancellation, and refund metrics, served by the new rollup view.
 
 - `skeleton/ui.py`
   - Added `# TASK 6 EXTENSION:` marker near the top.
