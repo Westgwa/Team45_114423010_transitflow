@@ -262,7 +262,9 @@ The cases below are drawn from the project's development log; each one shows how
 
 3. **Dual-store stations (Postgres + Neo4j).** PostgreSQL is the system of record for transactional data (bookings, payments, credentials); Neo4j holds only the topology used for routing. The cost is that two seeders must be kept in sync — a station added in one store must appear in the other. In production we would designate Postgres as the single source of truth and derive the graph from it via change-data-capture (CDC) rather than a parallel seeder.
 
-4. **Production hardening checklist.** Before this project could ship we would add: parameterised connection pooling; schema migrations managed by a tool such as Alembic or Flyway instead of rebuilding Docker volumes; secret management through a vault rather than a committed `.env`; HNSW parameter tuning together with explicit embedding-dimension governance; and monitoring of transaction retry/rollback rates to catch contention early.
+4. **Implemented performance optimizations.** The query layer already borrows from a parameterised PostgreSQL connection pool (`psycopg2.pool.SimpleConnectionPool`, 1–20 connections, via `get_db_connection()`), so each request reuses a warm connection instead of reconnecting per call. JSONB columns that are filtered (`metro_schedules.operates_on`, `national_rail_schedules.operates_on` / `fare_classes` / `passed_through_stations`) carry GIN indexes, and Neo4j seeding is batched with `UNWIND` so re-seeding stays fast and idempotent.
+
+5. **Production hardening checklist.** Before this project could ship we would additionally add: schema migrations managed by a tool such as Alembic or Flyway instead of rebuilding Docker volumes; secret management through a vault rather than a committed `.env`; HNSW parameter tuning together with explicit embedding-dimension governance; and monitoring of transaction retry/rollback rates to catch contention early.
 
 ## Section 7 — Bonus Extension Motivation, Changes, Example Queries, and Testing Evidence
 
