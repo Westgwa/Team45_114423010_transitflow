@@ -369,6 +369,74 @@ def section_seat_availability():
           str(called))
 
 
+def section_single_tool():
+    """A multi-tool native selection must collapse to the single best tool."""
+    print("\n=== Single-tool selection: collapse multi-tool native results ===")
+
+    # availability + stray find_route -> keep ONLY availability
+    out = agent._normalize_tool_calls(
+        [
+            {"name": "check_national_rail_availability",
+             "params": {"origin_id": "NR01", "destination_id": "NR05"}},
+            {"name": "find_route",
+             "params": {"origin_id": "NR01", "destination_id": "NR05"}},
+        ],
+        "Are there available seats from NR01 to NR05?",
+    )
+    check("availability + find_route -> only check_national_rail_availability",
+          len(out) == 1 and out[0]["name"] == "check_national_rail_availability",
+          str(out))
+
+    # duplicate availability calls -> de-duplicated to one
+    out = agent._normalize_tool_calls(
+        [
+            {"name": "check_national_rail_availability",
+             "params": {"origin_id": "NR01", "destination_id": "NR05"}},
+            {"name": "check_national_rail_availability",
+             "params": {"origin_id": "Central", "destination_id": "Stonehaven"}},
+        ],
+        "Any seats NR01 to NR05?",
+    )
+    check("duplicate availability calls collapse to one (names normalised)",
+          len(out) == 1 and out[0]["name"] == "check_national_rail_availability"
+          and out[0]["params"]["origin_id"] == "NR01"
+          and out[0]["params"]["destination_id"] == "NR05",
+          str(out))
+
+    # route question with a stray availability -> keep find_route
+    out = agent._normalize_tool_calls(
+        [
+            {"name": "check_national_rail_availability",
+             "params": {"origin_id": "MS01", "destination_id": "MS14"}},
+            {"name": "find_route",
+             "params": {"origin_id": "MS01", "destination_id": "MS14",
+                        "optimise_by": "fastest"}},
+        ],
+        "What is the fastest route from MS01 to MS14?",
+    )
+    check("route question -> only find_route (network=metro, optimise_by=time)",
+          len(out) == 1 and out[0]["name"] == "find_route"
+          and out[0]["params"]["network"] == "metro"
+          and out[0]["params"]["optimise_by"] == "time",
+          str(out))
+
+    # station names still normalised inside the surviving call
+    out = agent._normalize_tool_calls(
+        [
+            {"name": "check_national_rail_availability",
+             "params": {"origin_id": "Central", "destination_id": "Stonehaven"}},
+            {"name": "find_route",
+             "params": {"origin_id": "Central", "destination_id": "Stonehaven"}},
+        ],
+        "Seats from Central to Stonehaven?",
+    )
+    check("surviving availability call has names -> NR01/NR05",
+          len(out) == 1 and out[0]["name"] == "check_national_rail_availability"
+          and out[0]["params"]["origin_id"] == "NR01"
+          and out[0]["params"]["destination_id"] == "NR05",
+          str(out))
+
+
 def main() -> int:
     print("TransitFlow — Tool-Selection / Normalisation Tests")
     section_helpers()
@@ -376,6 +444,7 @@ def main() -> int:
     section_extra()
     section_runagent()
     section_seat_availability()
+    section_single_tool()
 
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     failed = len(RESULTS) - passed

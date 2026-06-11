@@ -120,6 +120,20 @@ _AVAILABILITY_KEYWORDS = (
     "訂位", "可預訂", "是否可預訂", "預訂",
 )
 
+# Alternative-route / disruption intent (English + Chinese).
+_ALTERNATIVE_KEYWORDS = (
+    "alternative route", "alternative routes", "avoid", "closed", "closure",
+    "disrupted", "disruption", "blocked", "unavailable", "detour",
+    "繞道", "繞路", "避開", "改道",
+)
+
+# Route / path / how-to-get intent (English + Chinese).
+_ROUTE_KEYWORDS = (
+    "route", "path", "how do i get", "how to get", "directions", "fastest",
+    "quickest", "shortest", "cheapest", "transfer", "interchange", "via",
+    "怎麼去", "怎麼到", "如何到", "路線", "最快", "最便宜", "轉乘", "怎麼走",
+)
+
 
 def _resolve_station_id(value, network_hint: Optional[str] = None) -> Optional[str]:
     """Map a station reference (id OR name OR alias) to a canonical MSxx/NRxx id."""
@@ -278,6 +292,59 @@ def _station_ids_from_text(text: str) -> list[str]:
     return ids
 
 
+def _pick_primary_tool_call(calls: list[dict], user_message: str) -> list[dict]:
+    """Collapse a multi-tool native selection down to the single best tool.
+
+    Native selection sometimes returns several calls at once (e.g. an
+    availability question yielding BOTH check_national_rail_availability and a
+    stray find_route, or the same tool twice). We:
+      1. drop exact duplicates (same name + same params), then
+      2. keep only the one call matching the question's dominant intent, so a
+         seat-availability question runs check_*_availability alone.
+    """
+    if len(calls) <= 1:
+        return calls
+
+    # 1) de-duplicate identical calls.
+    deduped: list[dict] = []
+    seen: set = set()
+    for c in calls:
+        key = (c.get("name"), json.dumps(c.get("params", {}), sort_keys=True, default=str))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+    if len(deduped) == 1:
+        return deduped
+
+    # 2) pick the call that matches the dominant intent (most specific first).
+    low = user_message.lower()
+    if any(k in low for k in _POLICY_KEYWORDS):
+        preferred = ("search_policy",)
+    elif any(k in low for k in _ALTERNATIVE_KEYWORDS):
+        preferred = ("find_alternative_routes",)
+    elif any(k in low for k in _AVAILABILITY_KEYWORDS):
+        preferred = ("check_national_rail_availability", "check_metro_availability")
+    elif any(k in low for k in _ROUTE_KEYWORDS):
+        preferred = ("find_route",)
+    else:
+        preferred = ()
+
+    candidates = [c for c in deduped if c.get("name") in preferred]
+    if candidates:
+        # Tie-break availability metro vs rail by the resolved origin id.
+        if len(candidates) > 1:
+            for c in candidates:
+                oid = str(c.get("params", {}).get("origin_id", "")).upper()
+                if c["name"] == "check_metro_availability" and oid.startswith("MS"):
+                    return [c]
+                if c["name"] == "check_national_rail_availability" and oid.startswith("NR"):
+                    return [c]
+        return [candidates[0]]
+
+    # 3) no clear intent match -> keep just the first call (never run several).
+    return [deduped[0]]
+
+
 def _normalize_tool_calls(tool_calls: list[dict] | None, user_message: str) -> list[dict]:
     """Repair LLM-selected tool calls so they carry valid, complete arguments."""
     if not tool_calls:
@@ -384,7 +451,9 @@ def _normalize_tool_calls(tool_calls: list[dict] | None, user_message: str) -> l
 
         repaired.append({"name": name, "params": params})
 
-    return repaired
+    # Collapse a multi-tool native selection to the single most appropriate tool
+    # (e.g. an availability question must not also run a stray find_route).
+    return _pick_primary_tool_call(repaired, user_message)
 
 
 SYSTEM_PROMPT = """You are TransitFlow, a transit assistant for a dual-network system.
@@ -922,6 +991,9 @@ STATIONS: Metro=MS01-MS20, Rail=NR01-NR10
 USER: {current_user_email or "not logged in"}
 
 Rules:
+- Select EXACTLY ONE tool — the single best match for the question. Never return
+  more than one tool call, and never repeat the same tool. A seat-availability
+  question selects ONLY check_*_availability, not also find_route.
 - params are the ACTUAL arguments, never a JSON schema (no type/properties/required keys).
 - Stations must be ids (MSxx / NRxx). Convert names to ids: Central Station->NR01,
   Central Square->MS01, Stonehaven->NR05, Old Town->MS07, Sunnyvale->MS18.
@@ -974,6 +1046,9 @@ JSON:"""
             _augmented_message,
             system_prompt=(
                 "You are a tool router. "
+                "Select EXACTLY ONE tool — the single best match for the question. "
+                "Never select more than one tool and never repeat a tool; a seat-availability "
+                "question selects ONLY check_*_availability, not also find_route. "
                 "params MUST be the actual function arguments — NEVER a JSON schema "
                 "(never output keys like type/properties/required). "
                 "Stations MUST be ids: metro=MSxx (MS01-MS20), national rail=NRxx (NR01-NR10). "
