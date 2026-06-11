@@ -1,8 +1,12 @@
-# TransitFlow — Live Test Guide
+# TransitFlow — Team 45
 
 An LLM + RAG transit assistant backed by three databases: **PostgreSQL** (relational + pgvector) and **Neo4j** (graph routing). Built for IM2002 Database Management.
 
-This guide is a runbook for the live test session: how to start the stack, seed the databases, launch the app, verify correctness, and exercise the bonus features.
+| Member | Student ID | GitHub |
+|--------|-----------|--------|
+| 郭明儒 *(Team Leader)* | 114423010 | [Westgwa](https://github.com/Westgwa) |
+| 卓少筠 | 113403005 | [carol941228](https://github.com/carol941228) |
+| 林楷崋 | 113403018 | [tsczta](https://github.com/tsczta) |
 
 ## Architecture
 
@@ -36,13 +40,9 @@ python skeleton/seed_postgres.py
 python skeleton/seed_neo4j.py
 python skeleton/seed_vectors.py    # requires the LLM provider to be running
 
-# 4. Launch the app (FastAPI + Gradio, with the live-notification WebSocket)
+# 4. Launch the Gradio chat UI
 python skeleton/ui.py              # http://127.0.0.1:7860
 ```
-
-> **Note:** The entry point launches a FastAPI/uvicorn server that hosts the Gradio UI at `/`
-> and a WebSocket endpoint at `/ws/notifications`. Open the UI in a browser; the "Live
-> Notifications" panel connects automatically.
 
 ### Verify the installation
 
@@ -59,27 +59,6 @@ Runs 42 checks mirroring the live-testing rubric (seeding integrity, all Postgre
 | pgAdmin | http://localhost:5051 | admin@admin.com / admin (server: `postgres:5432`, user/pass/db `transitflow`) |
 | Neo4j Browser | http://localhost:7475 | neo4j / transitflow |
 
-## Exercising the core features (live test)
-
-In the Gradio chat, try prompts such as:
-
-- **Availability & fares:** "What national rail services run from NR01 to NR05 on 2026-04-15?" · "How much is a metro ticket from MS01 to MS10?"
-- **Routing (Neo4j):** "What is the fastest route from NR01 to NR12?" · "What is the cheapest first-class route?" · "Which stations are affected if NR05 is delayed?"
-- **Policy (RAG):** "What is the refund policy for a cancelled first-class ticket?"
-- **Booking (after login):** register / log in, then "Book me a seat on NR_1001 for 2026-04-15" and "Cancel booking <id>".
-
-## Exercising the Task 6 bonus features (live test)
-
-All bonus features are reachable from the sidebar of the running app:
-
-- **Booking analytics dashboard** — enter a date range and click *Refresh booking analytics* to see total/active/cancelled bookings, revenue, and refunds.
-- **CSV export** — click *Export analytics CSV*, and (after login) *Export trip history CSV*, to download timestamped reports.
-- **Trip history** — after logging in, click *Load my trip history* to list your bookings.
-- **Route visualizer** — enter origin/destination station IDs and a route type, then click *Visualize Route* to see the route as text **and** an interactive node graph.
-- **Live notifications** — make or cancel a booking through the chat; a notification appears in real time in the *Live Notifications* panel, pushed over `/ws/notifications`.
-
-See [`TASK6.md`](TASK6.md) for the full list of modified files/functions, and [`Team45_DESIGN_DOC.md`](Team45_DESIGN_DOC.md) Section 7 for motivation, example queries, and testing evidence.
-
 ## Repository structure
 
 ```
@@ -94,7 +73,6 @@ skeleton/
   seed_neo4j.py              # idempotent graph seeding (MERGE)
   seed_vectors.py            # embeds policy documents into pgvector
   agent.py / ui.py           # tool-calling LLM agent + Gradio interface
-  notifications.py / server.py  # WebSocket notifications + FastAPI/uvicorn server (Task 6)
 scripts/
   live_test_simulation.py    # 42-check grading simulation
 train-mock-data/             # course-provided dataset (JSON)
@@ -102,3 +80,7 @@ docs/er_diagram.*            # rendered ER diagram (mermaid source + png/svg)
 Team45_DESIGN_DOC.md         # design document, Sections 1–7
 TASK6.md                     # bonus extension: modified files and functions
 ```
+
+## Task 6 — Bonus extension
+
+Database-backed analytics added on top of the core spec: booking-revenue summary, per-user trip history, and a route visualiser panel in the UI. Every touched file carries a `# TASK 6 EXTENSION:` marker; see [`TASK6.md`](TASK6.md) for the full file/function list and [`Team45_DESIGN_DOC.md`](Team45_DESIGN_DOC.md) Section 7 for motivation, example queries, and testing evidence.
