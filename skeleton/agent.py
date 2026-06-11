@@ -673,6 +673,78 @@ get_booking_analytics(start_date?, end_date?)
 get_trip_history()"""
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Validation: decides whether the normalised native tool call can run as-is.
+# This is the single gate that keeps a correct native selection from ever being
+# overwritten by the deterministic fallback. (ok=True -> execute native, skip
+# fallback; ok=False -> the reason names the first problem and the fallback then
+# rebuilds the call dynamically from the user's question.)
+# ─────────────────────────────────────────────────────────────────────────────
+_TOOL_NAMES = {t["name"] for t in TOOLS}
+_REQUIRED_BY_TOOL = {t["name"]: list(t.get("required", [])) for t in TOOLS}
+_STATION_FIELDS = (
+    "origin_id", "destination_id", "avoid_station_id", "station_id",
+    "origin_station_id", "destination_station_id",
+)
+
+
+def _validate_tool_call(calls: list[dict]) -> tuple[bool, str]:
+    """Return (ok, reason) for the normalised native selection.
+
+    Fails (-> fallback) on exactly the cases the fallback exists for:
+    empty selection, >1 tool, unknown tool, schema-shaped params, empty-string
+    params, missing required params, a station field that is still a name or an
+    invalid id, or a find_route with a wrong network / unsupported optimise_by.
+    """
+    if not calls:
+        return False, "native selection returned no tool ([])"
+    if len(calls) > 1:
+        return False, f"native selected {len(calls)} tools (expected exactly 1)"
+
+    call = calls[0]
+    name = call.get("name")
+    if name not in _TOOL_NAMES:
+        return False, f"unknown / wrong tool {name!r}"
+
+    params = call.get("params")
+    if not isinstance(params, dict):
+        return False, "params is not an object"
+    if _params_look_like_schema(params):
+        return False, "params look like a JSON schema, not arguments"
+
+    for k, v in params.items():
+        if isinstance(v, str) and v.strip() == "":
+            return False, f"empty-string param {k!r}"
+
+    missing = [
+        r for r in _REQUIRED_BY_TOOL.get(name, [])
+        if not str(params.get(r, "")).strip()
+    ]
+    if missing:
+        return False, f"missing required params: {missing}"
+
+    # Every station-bearing field must be a canonical MSxx/NRxx id — not a name
+    # like "Central Station", not an invalid id like "MR01".
+    for f in _STATION_FIELDS:
+        if f in params and str(params[f]).strip():
+            if not _STATION_ID_RE.match(str(params[f])):
+                return False, f"{f}={params[f]!r} is not a valid station id"
+
+    # Route network / optimise_by must be self-consistent and supported.
+    if name == "find_route":
+        o, d = params.get("origin_id"), params.get("destination_id")
+        if o and d and params.get("network") != _infer_network(o, d):
+            return False, f"network={params.get('network')!r} does not match the station ids"
+        if params.get("optimise_by") not in ("time", "cost"):
+            return False, f"optimise_by={params.get('optimise_by')!r} is not supported"
+    if name == "find_alternative_routes":
+        o, d = params.get("origin_id"), params.get("destination_id")
+        if o and d and params.get("network") not in (None, _infer_network(o, d)):
+            return False, f"network={params.get('network')!r} does not match the station ids"
+
+    return True, "native call is valid"
+
+
 def _execute_tool(
     tool_name: str,
     params: dict,
@@ -1087,9 +1159,6 @@ JSON:"""
             ),
         )
 
-        if debug:
-            debug_info.append(f"**Tool selection (native):** {tool_calls}")
-
     else:
         selection_response = llm.chat(
             messages=[{"role": "user", "content": tool_selection_prompt}],
@@ -1097,22 +1166,29 @@ JSON:"""
         )
         tool_calls = _parse_tool_calls(selection_response) or []
 
-        if debug:
-            debug_info.append(f"**Tool selection:** {selection_response}")
-
     # Step 1.4: repair the LLM's tool call (station names -> ids, network
     # inference, schema-as-params, search_policy query, get_user_bookings
     # misroute) so a correct native selection no longer needs the fallback.
     _raw_tool_calls = tool_calls
     tool_calls = _normalize_tool_calls(tool_calls, user_message)
 
-    if debug:
-        if tool_calls != _raw_tool_calls:
-            debug_info.append(f"**Normalised tool call:** {tool_calls}")
-        else:
-            debug_info.append(f"**Normalised tool call:** {tool_calls} (unchanged)")
+    # Step 1.5: validate the normalised native call. If it passes, it runs as-is
+    # and the deterministic fallback is skipped entirely.
+    native_valid, _validation_reason = _validate_tool_call(tool_calls)
 
-    # Step 1.5: deterministic fallback / correction
+    if debug:
+        debug_info.append(f"**Native tool call:** {_raw_tool_calls if _raw_tool_calls else '[]'}")
+        debug_info.append(f"**Normalised tool call:** {tool_calls if tool_calls else '[]'}")
+        debug_info.append(
+            f"**Validation result:** {'passed' if native_valid else 'failed'}"
+        )
+        if native_valid:
+            debug_info.append("**Fallback skipped:** native call is valid")
+        else:
+            debug_info.append(f"**Fallback reason:** {_validation_reason}")
+
+    # Step 1.6: deterministic fallback / correction — only reached when the
+    # native call failed validation.
     _lower = _augmented_message.lower()
 
     def _extract_unique_station_ids(text: str) -> list[str]:
@@ -1138,34 +1214,11 @@ JSON:"""
     _station_ids = _explicit_station_ids or _extract_unique_station_ids(_augmented_message)
     _two_stations = len(_station_ids) >= 2
 
-    # Required params per tool, used to decide whether the native+normalised call
-    # is already complete enough to trust (so the fallback can defer to it).
-    _req_by_tool = {t["name"]: set(t.get("required", [])) for t in TOOLS}
-
-    def _native_call_ok(names: set) -> bool:
-        """True when the model's (already-normalised) call targets one of `names`
-        AND carries every required param — i.e. it will succeed on its own."""
-        if not tool_calls:
-            return False
-        call = tool_calls[0]
-        nm = call.get("name")
-        if nm not in names:
-            return False
-        p = {k: v for k, v in (call.get("params") or {}).items() if v not in ("", None)}
-        return all(r in p for r in _req_by_tool.get(nm, set()))
-
     def _fallback(name: str, params: dict, reason: str, keep_if: tuple = ()):
         nonlocal tool_calls
-        # Defer to a correct native selection: if the model already chose the
-        # intended tool with valid params, keep it so success comes from native
-        # selection rather than the fallback overwriting it every time.
-        keepers = set(keep_if) | {name}
-        if _native_call_ok(keepers):
-            if debug:
-                debug_info.append(
-                    f"**Fallback skipped:** native already valid "
-                    f"({tool_calls[0].get('name')}) — {reason}"
-                )
+        # A native call that passed validation always wins — never enter the
+        # fallback in that case. Otherwise rebuild the call from the question.
+        if native_valid:
             return
         tool_calls = [{"name": name, "params": params}]
         if debug:
@@ -1468,7 +1521,7 @@ JSON:"""
             _fallback("get_trip_history", {}, "detailed trip-history query")
 
     if debug:
-        debug_info.append(f"**Final tool call(s):** {tool_calls}")
+        debug_info.append(f"**Final call:** {tool_calls if tool_calls else '[]'}")
 
     # Step 2: Execute each tool call
     tool_results = []

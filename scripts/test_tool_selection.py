@@ -287,6 +287,57 @@ def section_extra():
           str(r))
 
 
+def section_validation():
+    """_validate_tool_call gates the fallback: passes only on a complete,
+    id-correct single call; fails on exactly the cases the fallback exists for."""
+    print("\n=== Validation gate ===")
+
+    ok, _ = agent._validate_tool_call(
+        [{"name": "check_national_rail_availability",
+          "params": {"origin_id": "NR01", "destination_id": "NR05"}}])
+    check("valid availability call -> passed", ok is True)
+
+    ok, reason = agent._validate_tool_call([])
+    check("empty selection -> failed", ok is False and "no tool" in reason)
+
+    ok, reason = agent._validate_tool_call([
+        {"name": "check_national_rail_availability", "params": {"origin_id": "NR01", "destination_id": "NR05"}},
+        {"name": "find_route", "params": {"origin_id": "NR01", "destination_id": "NR05"}},
+    ])
+    check("two tools -> failed", ok is False and "2 tools" in reason)
+
+    ok, reason = agent._validate_tool_call(
+        [{"name": "check_national_rail_availability",
+          "params": {"origin_id": "Central Station", "destination_id": "NR05"}}])
+    check("station name (not id) -> failed",
+          ok is False and "not a valid station id" in reason, reason)
+
+    ok, reason = agent._validate_tool_call(
+        [{"name": "check_national_rail_availability", "params": {"origin_id": "NR01"}}])
+    check("missing required param -> failed",
+          ok is False and "missing required" in reason, reason)
+
+    ok, reason = agent._validate_tool_call(
+        [{"name": "search_policy",
+          "params": {"properties": {"query": {"type": "string"}}, "type": "object"}}])
+    check("schema-shaped params -> failed",
+          ok is False and "schema" in reason, reason)
+
+    ok, reason = agent._validate_tool_call(
+        [{"name": "find_route",
+          "params": {"origin_id": "NR01", "destination_id": "NR05",
+                     "network": "metro", "optimise_by": "time"}}])
+    check("find_route wrong network -> failed",
+          ok is False and "network" in reason, reason)
+
+    ok, reason = agent._validate_tool_call(
+        [{"name": "find_route",
+          "params": {"origin_id": "MS01", "destination_id": "MS14",
+                     "network": "metro", "optimise_by": "fastest"}}])
+    check("find_route unsupported optimise_by -> failed",
+          ok is False and "optimise_by" in reason, reason)
+
+
 def section_runagent():
     """End-to-end: a correct native call must drive the result WITHOUT the
     deterministic fallback overwriting it."""
@@ -317,9 +368,15 @@ def section_runagent():
               captured.get("called_with", {}).get("origin_id") == "NR01"
               and captured.get("called_with", {}).get("destination_id") == "NR05",
               str(captured.get("called_with")))
-        check("fallback deferred to native (skipped, not overwritten)",
-              "Fallback skipped" in debug and "Fallback:" not in debug,
-              "fallback fired" if "Fallback:" in debug else "ok")
+        check("debug shows Validation result: passed",
+              "Validation result:** passed" in debug)
+        check("debug shows 'Fallback skipped: native call is valid'",
+              "Fallback skipped:** native call is valid" in debug)
+        check("no forced fallback fired (**Fallback:** absent)",
+              "**Fallback:**" not in debug,
+              "fallback fired" if "**Fallback:**" in debug else "ok")
+        check("debug shows Final call = native call",
+              "Final call:" in debug and "check_national_rail_availability" in debug)
     finally:
         agent.query_national_rail_availability = orig
         agent.llm.provider = "stub"
@@ -509,6 +566,7 @@ def main() -> int:
     section_helpers()
     section_scenarios()
     section_extra()
+    section_validation()
     section_runagent()
     section_seat_availability()
     section_station_guarantee()
