@@ -231,7 +231,7 @@ def query_alternative_routes(
           ) AS total_time
 
     ORDER BY total_time ASC, length(p) ASC
-    LIMIT $max_routes
+    LIMIT $fetch_limit
 
     RETURN
         total_time,
@@ -256,12 +256,16 @@ def query_alternative_routes(
     # =========================================================================
     driver = _get_driver()
     with driver.session() as session:
+        # Fetch more candidates than we need: a variable-length match yields the
+        # same station sequence once per parallel-edge combination (different
+        # lines / NR_ALT links), so we over-fetch and de-duplicate by node
+        # sequence below to return genuinely DISTINCT alternative routes.
         records = session.run(
             cypher,
             origin_id=origin_id,
             destination_id=destination_id,
             avoid_ids=avoid_ids,
-            max_routes=max_routes,
+            fetch_limit=max(max_routes * 25, 50),
         )
 
         # Keep the user's request and our connected-interchange expansion in
@@ -281,10 +285,19 @@ def query_alternative_routes(
             resolved_avoid_id = interchange_counterparts.get(avoid_station_id, avoid_station_id)
 
         routes = []
-        for index, record in enumerate(records, start=1):
+        seen_paths: set = set()
+        for record in records:
+            # De-duplicate by the station-id sequence so we never return the same
+            # path twice (records are ordered by total_time ASC, so the first
+            # occurrence of a sequence is its cheapest variant).
+            signature = tuple(s["station_id"] for s in record["stations"])
+            if signature in seen_paths:
+                continue
+            seen_paths.add(signature)
+
             routes.append(
                 {
-                    "route_number": index,
+                    "route_number": len(routes) + 1,
                     "origin_id": origin_id,
                     "destination_id": destination_id,
                     "original_avoid_station_id": avoid_station_id,
@@ -299,6 +312,8 @@ def query_alternative_routes(
                     "legs": record["legs"],
                 }
             )
+            if len(routes) >= max_routes:
+                break
         return routes
 
 
