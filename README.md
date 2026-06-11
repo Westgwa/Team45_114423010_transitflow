@@ -2,12 +2,6 @@
 
 An LLM + RAG transit assistant backed by three databases: **PostgreSQL** (relational + pgvector) and **Neo4j** (graph routing). Built for IM2002 Database Management.
 
-| Member | Student ID | GitHub |
-|--------|-----------|--------|
-| 郭明儒 *(Team Leader)* | 114423010 | [Westgwa](https://github.com/Westgwa) |
-| 卓少筠 | 113403005 | [carol941228](https://github.com/carol941228) |
-| 林楷崋 | 113403018 | [tsczta](https://github.com/tsczta) |
-
 ## Architecture
 
 | Database | Role | Key design |
