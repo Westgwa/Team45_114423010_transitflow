@@ -103,6 +103,23 @@ _PERSONAL_KEYWORDS = (
     "my purchase", "booking history", "my history", "show my", "view my",
 )
 
+# Seat / availability / can-I-book intent — English + Chinese. Used by both the
+# native router prompt and the deterministic fallback so a seat-availability
+# question maps to check_*_availability instead of returning no tool.
+_AVAILABILITY_KEYWORDS = (
+    # English: trains / schedules / seats / booking availability
+    "train", "trains", "service", "services", "run from", "runs from",
+    "schedule", "timetable", "available", "availability",
+    "seat", "seats", "available seat", "available seats", "seat availability",
+    "any seats", "spare seat", "free seat", "booking availability",
+    "can i book", "is it available", "is there a ticket", "any tickets",
+    "tickets available", "ticket available",
+    # Chinese: 座位 / 車位 / 有票 / 可訂位 / 預訂
+    "座位", "車位", "有位", "有沒有位", "有沒有座位", "還有座位",
+    "有票", "有沒有票", "還有票", "可訂位", "是否可訂位", "能訂位",
+    "訂位", "可預訂", "是否可預訂", "預訂",
+)
+
 
 def _resolve_station_id(value, network_hint: Optional[str] = None) -> Optional[str]:
     """Map a station reference (id OR name OR alias) to a canonical MSxx/NRxx id."""
@@ -914,8 +931,10 @@ Rules:
   cheapest/lowest-fare/lowest-cost -> "cost").
 - Route/path/direction/fastest/cheapest/how-to-get questions: use find_route.
 - Alternative route / closed station / avoid station / detour questions: use find_alternative_routes.
-- Available seats / availability / capacity / booking-availability / trains-between questions:
-  use check_national_rail_availability (rail) or check_metro_availability (metro).
+- Seat availability / available seats / capacity / booking-availability / "is there a
+  ticket" / "can I book" / trains-between questions — including Chinese 座位 / 車位 / 有票 /
+  是否可訂位 / 可預訂 — MUST select check_national_rail_availability (rail) or
+  check_metro_availability (metro). NEVER return an empty tool_calls list for these.
 - Policy questions — delay compensation, refund, cancellation, ticket rules, entitled,
   claim, bike/bicycle policy, luggage, travel policy: use search_policy with only
   {{"query": <user question>}}. A "delayed ... what am I entitled to" question is POLICY,
@@ -940,6 +959,8 @@ Examples:
 "If NR03 is closed, what alternative routes exist from NR01 to NR05?" -> {{"tool_calls": [{{"name": "find_alternative_routes", "params": {{"origin_id": "NR01", "destination_id": "NR05", "avoid_station_id": "NR03", "network": "rail"}}}}]}}
 "route MS01 to NR05" -> {{"tool_calls": [{{"name": "find_route", "params": {{"origin_id": "MS01", "destination_id": "NR05", "network": "auto", "optimise_by": "time"}}}}]}}
 "Central to Stonehaven seats" -> {{"tool_calls": [{{"name": "check_national_rail_availability", "params": {{"origin_id": "NR01", "destination_id": "NR05"}}}}]}}
+"Are there available seats from NR01 to NR05?" -> {{"tool_calls": [{{"name": "check_national_rail_availability", "params": {{"origin_id": "NR01", "destination_id": "NR05"}}}}]}}
+"NR01 到 NR05 還有座位嗎？是否可訂位？" -> {{"tool_calls": [{{"name": "check_national_rail_availability", "params": {{"origin_id": "NR01", "destination_id": "NR05"}}}}]}}
 "My train was delayed 45 minutes — what compensation am I entitled to?" -> {{"tool_calls": [{{"name": "search_policy", "params": {{"query": "My train was delayed 45 minutes — what compensation am I entitled to?"}}}}]}}
 "refund policy" -> {{"tool_calls": [{{"name": "search_policy", "params": {{"query": "refund policy"}}}}]}}
 
@@ -966,7 +987,10 @@ JSON:"""
                 "optimise_by MUST be exactly 'time' or 'cost' — map fastest/quickest/shortest to 'time', "
                 "cheapest/lowest fare/lowest cost to 'cost'. "
                 "Metro fare/price/how much questions use get_metro_fare only when the user asks price, not route. "
-                "National rail availability/seats/train/service/schedule questions use check_national_rail_availability; "
+                "Seat availability / available seats / capacity / 'is there a ticket' / 'can I book' / "
+                "train / service / schedule questions — including Chinese 座位/車位/有票/是否可訂位/可預訂 — "
+                "MUST use check_national_rail_availability (rail) or check_metro_availability (metro); "
+                "never return an empty tool list for a seat-availability question. "
                 "travel_date is optional — omit it if no date is given, never send an empty string. "
                 "Policy questions — delay compensation, refund, cancellation, ticket rules, entitled, claim, "
                 "bicycle/bike policy, luggage, travel policy — use search_policy with only {query: <user question>}; "
@@ -1206,21 +1230,8 @@ JSON:"""
             "forced route query",
         )
 
-    # 2. Train / schedule / service / availability
-    _avail_triggers = {
-        "train",
-        "trains",
-        "service",
-        "services",
-        "run from",
-        "runs from",
-        "schedule",
-        "timetable",
-        "available",
-        "availability",
-    }
-
-    _is_availability = any(kw in _lower for kw in _avail_triggers)
+    # 2. Train / schedule / service / seat-availability (English + Chinese)
+    _is_availability = any(kw in _lower for kw in _AVAILABILITY_KEYWORDS)
 
     if not _is_policy and not _is_alternative and not _is_route and _is_availability and _two_stations:
         origin_id = _station_ids[0].upper()
@@ -1274,22 +1285,9 @@ JSON:"""
         if any(kw in _lower for kw in _personal_triggers):
             _fallback("get_user_bookings", {}, "personal booking query")
 
-    # 2. Force train / schedule / availability questions to the correct tool
+    # 2. Force train / schedule / seat-availability questions to the correct tool
     if not tool_calls:
-        _avail_triggers = {
-            "train",
-            "trains",
-            "service",
-            "services",
-            "run from",
-            "runs from",
-            "schedule",
-            "timetable",
-            "available",
-            "availability",
-        }
-
-        _is_availability = any(kw in _lower for kw in _avail_triggers)
+        _is_availability = any(kw in _lower for kw in _AVAILABILITY_KEYWORDS)
 
         if _is_availability and _two_stations:
             o, d = _station_ids[0].upper(), _station_ids[1].upper()

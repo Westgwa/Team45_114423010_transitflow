@@ -314,12 +314,68 @@ def section_runagent():
         agent.llm.next_tool_calls = []
 
 
+def _run_native_empty(message: str):
+    """Run run_agent with the native path returning [] (no tool), capturing the
+    availability call params + debug trace. Returns (called_with, debug)."""
+    agent.llm.provider = "ollama"
+    agent.llm.next_tool_calls = []          # native picked nothing
+    captured = {}
+
+    def _fake_avail(**params):
+        captured["called_with"] = params
+        return [{"schedule_id": "NRX1", **params}]
+
+    orig = agent.query_national_rail_availability
+    agent.query_national_rail_availability = _fake_avail
+    try:
+        _, _, debug = agent.run_agent(message, history=[], debug=True)
+    finally:
+        agent.query_national_rail_availability = orig
+        agent.llm.provider = "stub"
+        agent.llm.next_tool_calls = []
+    return captured.get("called_with"), debug
+
+
+def section_seat_availability():
+    """Native returns [] for a seat-availability question; the fallback must
+    select check_national_rail_availability with DYNAMIC origin/destination."""
+    print("\n=== Seat availability: native [] -> fallback picks availability (dynamic) ===")
+
+    # English "available seats", dynamic ids NR06 -> NR08 (NOT a hard-coded NR01->NR05).
+    called, _ = _run_native_empty("Are there available seats from NR06 to NR08?")
+    check("EN available-seats -> check_national_rail_availability NR06->NR08 (dynamic)",
+          called is not None
+          and called.get("origin_id") == "NR06"
+          and called.get("destination_id") == "NR08",
+          str(called))
+    check("EN available-seats -> no empty travel_date sent",
+          called is not None and called.get("travel_date") in (None, ),
+          str(called))
+
+    # Chinese seat / 可訂位 question, different ids again to prove it is not fixed.
+    called, _ = _run_native_empty("NR02 到 NR04 還有座位嗎？是否可訂位？")
+    check("ZH 座位/可訂位 -> check_national_rail_availability NR02->NR04 (dynamic)",
+          called is not None
+          and called.get("origin_id") == "NR02"
+          and called.get("destination_id") == "NR04",
+          str(called))
+
+    # Name-based seat query: Central Station -> Stonehaven must resolve to NR01 -> NR05.
+    called, _ = _run_native_empty("Any seats from Central Station to Stonehaven?")
+    check("name-based seats Central Station->Stonehaven -> NR01->NR05",
+          called is not None
+          and called.get("origin_id") == "NR01"
+          and called.get("destination_id") == "NR05",
+          str(called))
+
+
 def main() -> int:
     print("TransitFlow — Tool-Selection / Normalisation Tests")
     section_helpers()
     section_scenarios()
     section_extra()
     section_runagent()
+    section_seat_availability()
 
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     failed = len(RESULTS) - passed
