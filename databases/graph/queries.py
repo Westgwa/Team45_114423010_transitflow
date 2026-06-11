@@ -38,10 +38,14 @@ def example_count_nodes() -> int:
 
 
 def _network_filter(network: str) -> str:
+    # NOTE: this condition is appended after `apoc.algo.dijkstra ... YIELD path`,
+    # so it must reference `path` (the dijkstra output), not `p`. Referencing an
+    # undefined `p` previously raised a CypherSyntaxError whenever a caller asked
+    # for a metro- or rail-only route (network != "auto").
     if network == "metro":
-        return 'ALL(r IN relationships(p) WHERE r.network IN ["metro", "interchange"])'
+        return 'ALL(r IN relationships(path) WHERE r.network IN ["metro", "interchange"])'
     if network in {"rail", "national_rail"}:
-        return 'ALL(r IN relationships(p) WHERE r.network IN ["national_rail", "interchange"])'
+        return 'ALL(r IN relationships(path) WHERE r.network IN ["national_rail", "interchange"])'
     return "true"
 
 

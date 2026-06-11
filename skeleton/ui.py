@@ -640,7 +640,7 @@ with gr.Blocks(title="TransitFlow") as demo:
 
             gr.Markdown("---")
 
-            gr.Markdown("### � Analytics Dashboard")
+            gr.Markdown("### 📊 Analytics Dashboard")
             analytics_start_date = gr.Textbox(label="Start date", placeholder="YYYY-MM-DD")
             analytics_end_date = gr.Textbox(label="End date", placeholder="YYYY-MM-DD")
             analytics_button = gr.Button("Refresh booking analytics", variant="primary", size="sm")
@@ -650,7 +650,7 @@ with gr.Blocks(title="TransitFlow") as demo:
             analytics_export_file = gr.File(label="Download analytics CSV", visible=False)
 
             gr.Markdown("---")
-            gr.Markdown("### � Live Notifications")
+            gr.Markdown("### 🔔 Live Notifications")
             notification_panel = gr.HTML(
                 """
                 <div id='notification-area' style='min-height:130px; background:#f6f8fa; border:1px solid #d0d7de; border-radius:8px; padding:10px; overflow:auto; font-size:0.95rem;'>
@@ -695,7 +695,7 @@ with gr.Blocks(title="TransitFlow") as demo:
             )
 
             gr.Markdown("---")
-            gr.Markdown("### �🛫 Trip History")
+            gr.Markdown("### 🛫 Trip History")
             trip_history_button = gr.Button("Load my trip history", variant="primary", size="sm")
             trip_history_export_button = gr.Button("Export trip history CSV", variant="secondary", size="sm")
             trip_history_output = gr.Markdown(value="Log in to view your trips.")
@@ -716,7 +716,7 @@ with gr.Blocks(title="TransitFlow") as demo:
             route_graph_html = gr.HTML(value="", visible=False)
 
             gr.Markdown("---")
-            gr.Markdown("### �💡 Try these examples")
+            gr.Markdown("### 💡 Try these examples")
             for example in EXAMPLES:
                 gr.Button(example, size="sm").click(
                     fn=lambda e=example: e,
