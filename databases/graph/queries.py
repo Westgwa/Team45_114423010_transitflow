@@ -270,6 +270,16 @@ def query_alternative_routes(
         # skip so a closed station is not silently reachable via its twin.
         related_avoid_ids = [sid for sid in avoid_ids if sid != avoid_station_id]
 
+        # When the avoided station sits on the opposite network to the journey
+        # (e.g. avoid metro MS07 on a rail NR01->NR05 trip), surface its same-place
+        # counterpart as the "resolved" station so the reply can explain the
+        # mapping (MS07 -> NR03) instead of looking like the request was ignored.
+        resolved_avoid_id = avoid_station_id
+        if network == "rail" and avoid_station_id.startswith("MS"):
+            resolved_avoid_id = interchange_counterparts.get(avoid_station_id, avoid_station_id)
+        elif network == "metro" and avoid_station_id.startswith("NR"):
+            resolved_avoid_id = interchange_counterparts.get(avoid_station_id, avoid_station_id)
+
         routes = []
         for index, record in enumerate(records, start=1):
             routes.append(
@@ -277,6 +287,8 @@ def query_alternative_routes(
                     "route_number": index,
                     "origin_id": origin_id,
                     "destination_id": destination_id,
+                    "original_avoid_station_id": avoid_station_id,
+                    "resolved_avoid_station_id": resolved_avoid_id,
                     "avoid_station_ids": [avoid_station_id],
                     "related_avoid_station_ids": related_avoid_ids,
                     "total_time_min": record["total_time"],

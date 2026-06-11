@@ -133,7 +133,8 @@ def _resolve_station_id(value, network_hint: Optional[str] = None) -> Optional[s
     if trimmed and trimmed in _STATION_INDEX:
         return _STATION_INDEX[trimmed]
 
-    return None
+    # (8) Last resort: repair an id-shaped typo (e.g. "MR01" -> "NR01").
+    return _correct_station_typo(text, network_hint)
 
 
 def _infer_network(origin_id: Optional[str], destination_id: Optional[str]) -> str:
@@ -154,6 +155,82 @@ def _infer_optimise_by(text: str) -> str:
         "lowest fare", "fare", "price", "cost",
     )
     return "cost" if any(w in low for w in cost_words) else "time"
+
+
+# (3) The tool only accepts optimise_by in {"time", "cost"}. The LLM frequently
+# emits synonyms like "fastest" / "quickest" / "shortest_time"; map them so a
+# native call no longer needs the fallback to repair the value.
+_OPTIMISE_TIME_ALIASES = {
+    "time", "fastest", "quickest", "shortest", "shortest_time",
+    "shortest time", "soonest", "fast", "quick",
+}
+_OPTIMISE_COST_ALIASES = {
+    "cost", "cheapest", "cheap", "lowest_cost", "lowest cost",
+    "lowest_fare", "lowest fare", "least_expensive", "least expensive",
+    "price", "fare",
+}
+
+
+def _normalise_optimise_by(value, text: str) -> str:
+    """Map any optimise_by value/synonym to the tool's vocabulary ('time'|'cost').
+
+    Falls back to inferring from the user's message when the value is missing or
+    unrecognised, so optimise_by is always exactly 'time' or 'cost'.
+    """
+    if isinstance(value, str):
+        v = re.sub(r"\s+", " ", value.strip().lower())
+        if v in _OPTIMISE_TIME_ALIASES:
+            return "time"
+        if v in _OPTIMISE_COST_ALIASES:
+            return "cost"
+    return _infer_optimise_by(text)
+
+
+# (8) Valid station ids: metro MS01-MS20, national rail NR01-NR10.
+_VALID_STATION_PREFIXES = ("MS", "NR")
+_VALID_STATION_IDS = (
+    {f"MS{n:02d}" for n in range(1, 21)} | {f"NR{n:02d}" for n in range(1, 11)}
+)
+
+
+def _correct_station_typo(value, network_hint: Optional[str] = None) -> Optional[str]:
+    """Fix an id-shaped reference one edit away from a valid prefix (e.g. 'MR01'
+    -> 'NR01'). Returns None when the text is not id-shaped or cannot be repaired
+    to an existing station, so we never call a tool with a non-existent id.
+    """
+    if value is None:
+        return None
+    m = re.match(r"^([A-Za-z]{2})\s?(\d{1,2})$", str(value).strip())
+    if not m:
+        return None
+    prefix = m.group(1).upper()
+    num = f"{int(m.group(2)):02d}"
+
+    candidate = f"{prefix}{num}"
+    if candidate in _VALID_STATION_IDS:
+        return candidate
+
+    # Prefixes exactly one character different from what the LLM produced.
+    near = [
+        p for p in _VALID_STATION_PREFIXES
+        if sum(a != b for a, b in zip(prefix, p)) == 1
+    ]
+    if len(near) > 1:
+        # Tie-break: honour the network hint, else keep the matching 2nd letter
+        # ('MR' shares 'R' with 'NR' -> NR), else first valid candidate.
+        if network_hint == "metro" and "MS" in near:
+            near = ["MS"]
+        elif network_hint == "rail" and "NR" in near:
+            near = ["NR"]
+        else:
+            keep_second = [p for p in near if p[1] == prefix[1]]
+            near = keep_second or near
+
+    for p in near:
+        fixed = f"{p}{num}"
+        if fixed in _VALID_STATION_IDS:
+            return fixed
+    return None
 
 
 def _params_look_like_schema(params) -> bool:
@@ -207,6 +284,30 @@ def _normalize_tool_calls(tool_calls: list[dict] | None, user_message: str) -> l
         if _params_look_like_schema(params):
             params = {}
 
+        # (5) A clear policy / refund / compensation question wrongly routed to a
+        # data tool (e.g. check_national_rail_availability for "I was delayed —
+        # what am I entitled to?") -> reroute to search_policy at the native
+        # stage, so the fallback no longer has to rescue it.
+        if (
+            name in (
+                "check_national_rail_availability", "check_metro_availability",
+                "find_route", "find_alternative_routes",
+                "get_available_seats", "get_national_rail_fare",
+            )
+            and is_policy
+            and not is_personal
+            and len(msg_ids) < 2
+        ):
+            name = "search_policy"
+            params = {"query": user_message}
+
+        # (4) Never carry an empty / blank travel_date; drop it so the tool's
+        # own default (or None) applies instead of an empty string -> null.
+        if "travel_date" in params:
+            td = params.get("travel_date")
+            if not isinstance(td, str) or not td.strip():
+                params.pop("travel_date", None)
+
         # Network hint from the tool itself (used to disambiguate names like "Central").
         if name in ("check_national_rail_availability", "get_national_rail_fare"):
             hint = "rail"
@@ -254,7 +355,10 @@ def _normalize_tool_calls(tool_calls: list[dict] | None, user_message: str) -> l
                 params["network"] = _infer_network(o, d)
             else:
                 params.setdefault("network", "auto")
-            params.setdefault("optimise_by", _infer_optimise_by(user_message))
+            # (3) normalise fastest/quickest/shortest_time -> time, etc.
+            params["optimise_by"] = _normalise_optimise_by(
+                params.get("optimise_by"), user_message
+            )
 
         if name == "find_alternative_routes":
             o, d = params.get("origin_id"), params.get("destination_id")
@@ -805,12 +909,19 @@ Rules:
 - Stations must be ids (MSxx / NRxx). Convert names to ids: Central Station->NR01,
   Central Square->MS01, Stonehaven->NR05, Old Town->MS07, Sunnyvale->MS18.
 - network: both MSxx -> "metro"; both NRxx -> "rail"; MSxx+NRxx mix (cross-system) -> "auto".
-- find_route must include origin_id, destination_id, network, optimise_by
-  (optimise_by="cost" for cheapest/lowest-fare, else "time").
+- find_route must include origin_id, destination_id, network, optimise_by.
+  optimise_by MUST be exactly "time" or "cost" (map fastest/quickest/shortest -> "time",
+  cheapest/lowest-fare/lowest-cost -> "cost").
 - Route/path/direction/fastest/cheapest/how-to-get questions: use find_route.
-- Alternative route / closed station / avoid station questions: use find_alternative_routes.
-- Policy/refund/compensation/luggage/bicycle questions: use search_policy with only {{"query": <user question>}}.
+- Alternative route / closed station / avoid station / detour questions: use find_alternative_routes.
+- Available seats / availability / capacity / booking-availability / trains-between questions:
+  use check_national_rail_availability (rail) or check_metro_availability (metro).
+- Policy questions — delay compensation, refund, cancellation, ticket rules, entitled,
+  claim, bike/bicycle policy, luggage, travel policy: use search_policy with only
+  {{"query": <user question>}}. A "delayed ... what am I entitled to" question is POLICY,
+  NOT availability.
 - Do NOT use get_user_bookings for a general policy question — only for the user's OWN bookings.
+- travel_date is optional: omit it entirely if the user gave no date; never send "".
 - Booking/cancellation requires login.
 - Never use empty string params.
 
@@ -827,6 +938,9 @@ Examples:
 "cheapest route MS01 to MS14" -> {{"tool_calls": [{{"name": "find_route", "params": {{"origin_id": "MS01", "destination_id": "MS14", "network": "metro", "optimise_by": "cost"}}}}]}}
 "trains NR01 to NR05" -> {{"tool_calls": [{{"name": "check_national_rail_availability", "params": {{"origin_id": "NR01", "destination_id": "NR05"}}}}]}}
 "If NR03 is closed, what alternative routes exist from NR01 to NR05?" -> {{"tool_calls": [{{"name": "find_alternative_routes", "params": {{"origin_id": "NR01", "destination_id": "NR05", "avoid_station_id": "NR03", "network": "rail"}}}}]}}
+"route MS01 to NR05" -> {{"tool_calls": [{{"name": "find_route", "params": {{"origin_id": "MS01", "destination_id": "NR05", "network": "auto", "optimise_by": "time"}}}}]}}
+"Central to Stonehaven seats" -> {{"tool_calls": [{{"name": "check_national_rail_availability", "params": {{"origin_id": "NR01", "destination_id": "NR05"}}}}]}}
+"My train was delayed 45 minutes — what compensation am I entitled to?" -> {{"tool_calls": [{{"name": "search_policy", "params": {{"query": "My train was delayed 45 minutes — what compensation am I entitled to?"}}}}]}}
 "refund policy" -> {{"tool_calls": [{{"name": "search_policy", "params": {{"query": "refund policy"}}}}]}}
 
 JSON:"""
@@ -849,11 +963,14 @@ JSON:"""
                 "Alternative route / closed station / avoid station questions must use find_alternative_routes. "
                 "Route/directions/fastest/quickest/cheapest/path/how-to-get questions must use find_route "
                 "with all of origin_id, destination_id, network, optimise_by. "
-                "Cheapest/lowest fare/lowest cost route questions must set optimise_by='cost'. "
-                "Fastest/quickest/shortest route questions must set optimise_by='time'. "
+                "optimise_by MUST be exactly 'time' or 'cost' — map fastest/quickest/shortest to 'time', "
+                "cheapest/lowest fare/lowest cost to 'cost'. "
                 "Metro fare/price/how much questions use get_metro_fare only when the user asks price, not route. "
-                "National rail train/service/schedule questions must use check_national_rail_availability. "
-                "Policy/rules/compensation/luggage/bicycle questions use search_policy with only {query: <user question>}; "
+                "National rail availability/seats/train/service/schedule questions use check_national_rail_availability; "
+                "travel_date is optional — omit it if no date is given, never send an empty string. "
+                "Policy questions — delay compensation, refund, cancellation, ticket rules, entitled, claim, "
+                "bicycle/bike policy, luggage, travel policy — use search_policy with only {query: <user question>}; "
+                "a 'delayed ... what am I entitled to' question is POLICY (search_policy), NOT availability. "
                 "do NOT call get_user_bookings for a general policy question — only when the user asks about THEIR own bookings. "
                 "Output only tool calls."
             ),
@@ -878,8 +995,11 @@ JSON:"""
     _raw_tool_calls = tool_calls
     tool_calls = _normalize_tool_calls(tool_calls, user_message)
 
-    if debug and tool_calls and tool_calls != _raw_tool_calls:
-        debug_info.append(f"**Normalised tool call:** {tool_calls}")
+    if debug:
+        if tool_calls != _raw_tool_calls:
+            debug_info.append(f"**Normalised tool call:** {tool_calls}")
+        else:
+            debug_info.append(f"**Normalised tool call:** {tool_calls} (unchanged)")
 
     # Step 1.5: deterministic fallback / correction
     _lower = _augmented_message.lower()
@@ -907,8 +1027,35 @@ JSON:"""
     _station_ids = _explicit_station_ids or _extract_unique_station_ids(_augmented_message)
     _two_stations = len(_station_ids) >= 2
 
-    def _fallback(name: str, params: dict, reason: str):
+    # Required params per tool, used to decide whether the native+normalised call
+    # is already complete enough to trust (so the fallback can defer to it).
+    _req_by_tool = {t["name"]: set(t.get("required", [])) for t in TOOLS}
+
+    def _native_call_ok(names: set) -> bool:
+        """True when the model's (already-normalised) call targets one of `names`
+        AND carries every required param — i.e. it will succeed on its own."""
+        if not tool_calls:
+            return False
+        call = tool_calls[0]
+        nm = call.get("name")
+        if nm not in names:
+            return False
+        p = {k: v for k, v in (call.get("params") or {}).items() if v not in ("", None)}
+        return all(r in p for r in _req_by_tool.get(nm, set()))
+
+    def _fallback(name: str, params: dict, reason: str, keep_if: tuple = ()):
         nonlocal tool_calls
+        # Defer to a correct native selection: if the model already chose the
+        # intended tool with valid params, keep it so success comes from native
+        # selection rather than the fallback overwriting it every time.
+        keepers = set(keep_if) | {name}
+        if _native_call_ok(keepers):
+            if debug:
+                debug_info.append(
+                    f"**Fallback skipped:** native already valid "
+                    f"({tool_calls[0].get('name')}) — {reason}"
+                )
+            return
         tool_calls = [{"name": name, "params": params}]
         if debug:
             debug_info.append(f"**Fallback:** {reason} → {name}({params})")
@@ -1234,6 +1381,9 @@ JSON:"""
 
         if any(kw in _lower for kw in _trip_triggers):
             _fallback("get_trip_history", {}, "detailed trip-history query")
+
+    if debug:
+        debug_info.append(f"**Final tool call(s):** {tool_calls}")
 
     # Step 2: Execute each tool call
     tool_results = []

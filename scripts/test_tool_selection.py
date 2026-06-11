@@ -1,0 +1,338 @@
+"""
+TransitFlow — Tool-Selection / Normalisation Tests
+==================================================
+Pure-logic tests for the agent's native tool selection + parameter
+normalisation layer (skeleton/agent.py). These verify that a *single* native
+tool call is repaired into a correct, complete call WITHOUT relying on the
+deterministic fallback — covering the recurring native-selection bugs:
+
+  1. station name  -> station_id        (Central -> NR01, Stonehaven -> NR05)
+  2. network metro/rail/auto inference  (NRxx -> rail, MSxx -> metro, mix -> auto)
+  3. optimise_by synonyms               (fastest/quickest/shortest_time -> time)
+  4. empty travel_date                  ("" dropped, never sent as null)
+  5. wrong tool selection               (delay compensation -> search_policy)
+  6. schema-shaped params               ({properties,...} -> {"query": ...})
+  7. related avoid station              (avoid MS07 kept; backend maps -> NR03)
+  8. station_id typo                    (MR01 -> NR01)
+
+No database / LLM / Ollama is required: the heavy modules imported by
+skeleton.agent are stubbed in sys.modules before import, so only the pure
+helper functions run.
+
+Usage:
+    python scripts/test_tool_selection.py
+
+Exit code 0 = all checks passed.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import types
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stub the heavy modules so importing skeleton.agent does NOT connect to
+# Ollama / Postgres / Neo4j. We only exercise the pure normalisation helpers.
+# ─────────────────────────────────────────────────────────────────────────────
+def _install_stubs() -> None:
+    llm_mod = types.ModuleType("skeleton.llm_provider")
+
+    class _StubLLM:
+        """Programmable stub: tests set .provider and .next_tool_calls."""
+
+        def __init__(self):
+            self.provider = "stub"
+            self.next_tool_calls = []
+
+        def get_chat_provider(self):
+            return self.provider
+
+        def chat(self, *a, **k):
+            return "STUB ANSWER"
+
+        def embed(self, *a, **k):
+            return []
+
+        def ollama_tool_call(self, *a, **k):
+            return list(self.next_tool_calls)
+
+    llm_mod.llm = _StubLLM()
+    sys.modules["skeleton.llm_provider"] = llm_mod
+
+    notif_mod = types.ModuleType("skeleton.notifications")
+    notif_mod.notifications = types.SimpleNamespace(notify=lambda *a, **k: None)
+    sys.modules["skeleton.notifications"] = notif_mod
+
+    rel_mod = types.ModuleType("databases.relational.queries")
+    for fn in (
+        "query_national_rail_availability", "query_national_rail_fare",
+        "query_metro_schedules", "query_metro_fare", "query_available_seats",
+        "query_user_profile", "query_user_bookings", "execute_booking",
+        "execute_cancellation", "query_policy_vector_search",
+        "query_booking_revenue_summary", "query_trip_history",
+    ):
+        setattr(rel_mod, fn, lambda *a, **k: None)
+    sys.modules["databases.relational.queries"] = rel_mod
+
+    graph_mod = types.ModuleType("databases.graph.queries")
+    for fn in (
+        "query_shortest_route", "query_cheapest_route",
+        "query_alternative_routes", "query_interchange_path",
+        "query_delay_ripple",
+    ):
+        setattr(graph_mod, fn, lambda *a, **k: None)
+    sys.modules["databases.graph.queries"] = graph_mod
+
+
+_install_stubs()
+
+from skeleton import agent  # noqa: E402  (import after stubs are installed)
+
+
+RESULTS: list[tuple[str, bool, str]] = []
+
+
+def check(name: str, ok: bool, detail: str = "") -> None:
+    RESULTS.append((name, ok, detail))
+    print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
+
+
+def _one(native_call: dict, message: str) -> dict:
+    """Run a single native tool call through the normaliser, return the result."""
+    out = agent._normalize_tool_calls([native_call], message)
+    assert len(out) == 1, out
+    return out[0]
+
+
+# ── Helper-level unit checks ──────────────────────────────────────────────────
+
+def section_helpers():
+    print("\n=== Helpers: station / network / optimise_by / typo ===")
+
+    check("resolve 'Central' (rail hint) -> NR01",
+          agent._resolve_station_id("Central", "rail") == "NR01")
+    check("resolve 'Central Square' -> MS01",
+          agent._resolve_station_id("Central Square") == "MS01")
+    check("resolve 'Stonehaven' -> NR05",
+          agent._resolve_station_id("Stonehaven") == "NR05")
+    check("resolve already-id 'NR05' -> NR05",
+          agent._resolve_station_id("NR05") == "NR05")
+
+    check("network NR01+NR05 -> rail",
+          agent._infer_network("NR01", "NR05") == "rail")
+    check("network MS01+MS14 -> metro",
+          agent._infer_network("MS01", "MS14") == "metro")
+    check("network MS01+NR05 -> auto (cross-system)",
+          agent._infer_network("MS01", "NR05") == "auto")
+
+    check("optimise 'fastest' -> time",
+          agent._normalise_optimise_by("fastest", "fastest route") == "time")
+    check("optimise 'quickest' -> time",
+          agent._normalise_optimise_by("quickest", "x") == "time")
+    check("optimise 'shortest_time' -> time",
+          agent._normalise_optimise_by("shortest_time", "x") == "time")
+    check("optimise 'cheapest' -> cost",
+          agent._normalise_optimise_by("cheapest", "x") == "cost")
+    check("optimise missing -> inferred 'time'",
+          agent._normalise_optimise_by(None, "best route") == "time")
+
+    check("typo 'MR01' -> NR01",
+          agent._correct_station_typo("MR01") == "NR01")
+    check("typo 'NS01' (metro hint) -> MS01",
+          agent._correct_station_typo("NS01", "metro") == "MS01")
+    check("typo 'ZZ99' (unfixable) -> None",
+          agent._correct_station_typo("ZZ99") is None)
+
+    check("schema-shaped params detected",
+          agent._params_look_like_schema(
+              {"properties": {"query": {"type": "string"}},
+               "type": "object", "required": ["query"]}) is True)
+
+
+# ── Scenario checks (the 7 cases from the request) ────────────────────────────
+
+def section_scenarios():
+    print("\n=== Scenarios: native call -> normalised call ===")
+
+    # 1. national rail availability: Central -> Stonehaven (names -> NR01/NR05)
+    r = _one(
+        {"name": "check_national_rail_availability",
+         "params": {"origin_id": "Central", "destination_id": "Stonehaven"}},
+        "Are there available seats from Central to Stonehaven?",
+    )
+    check("1) availability Central->Stonehaven becomes NR01->NR05",
+          r["name"] == "check_national_rail_availability"
+          and r["params"]["origin_id"] == "NR01"
+          and r["params"]["destination_id"] == "NR05",
+          str(r))
+
+    # 2. metro route MS01 -> MS14, optimise_by fastest -> time, network metro
+    r = _one(
+        {"name": "find_route",
+         "params": {"origin_id": "MS01", "destination_id": "MS14",
+                    "network": "metro", "optimise_by": "fastest"}},
+        "What is the fastest route from MS01 to MS14?",
+    )
+    check("2) metro route -> network=metro, optimise_by=time",
+          r["name"] == "find_route"
+          and r["params"]["network"] == "metro"
+          and r["params"]["optimise_by"] == "time",
+          str(r))
+
+    # 3. cross-system route MS01 -> NR05: native said metro, must become auto
+    r = _one(
+        {"name": "find_route",
+         "params": {"origin_id": "MS01", "destination_id": "NR05",
+                    "network": "metro", "optimise_by": "fastest"}},
+        "How do I get from MS01 to NR05?",
+    )
+    check("3) cross-system route -> network=auto, optimise_by=time",
+          r["name"] == "find_route"
+          and r["params"]["network"] == "auto"
+          and r["params"]["optimise_by"] == "time",
+          str(r))
+
+    # 4. national rail alternative route NR01->NR05 avoid NR03: native said metro
+    r = _one(
+        {"name": "find_alternative_routes",
+         "params": {"origin_id": "NR01", "destination_id": "NR05",
+                    "avoid_station_id": "NR03", "network": "metro"}},
+        "If NR03 is closed, what alternative routes exist from NR01 to NR05?",
+    )
+    check("4) alternative route -> network=rail, avoid=NR03",
+          r["name"] == "find_alternative_routes"
+          and r["params"]["network"] == "rail"
+          and r["params"]["avoid_station_id"] == "NR03",
+          str(r))
+
+    # 5. related avoid station: NR01->NR05 avoid MS07. Agent keeps MS07 and rail;
+    #    the backend maps MS07 -> NR03 into related_avoid_station_ids.
+    r = _one(
+        {"name": "find_alternative_routes",
+         "params": {"origin_id": "NR01", "destination_id": "NR05",
+                    "avoid_station_id": "MS07", "network": "rail"}},
+        "Alternative routes from NR01 to NR05 avoiding Old Town metro (MS07)?",
+    )
+    check("5) avoid MS07 preserved, network=rail (backend maps -> NR03)",
+          r["params"]["avoid_station_id"] == "MS07"
+          and r["params"]["network"] == "rail",
+          str(r))
+
+    # 6. delay compensation must go to search_policy, NOT availability
+    msg = "My train was delayed 45 minutes — what compensation am I entitled to?"
+    r = _one(
+        {"name": "check_national_rail_availability",
+         "params": {"origin_id": "", "destination_id": ""}},
+        msg,
+    )
+    check("6) delay-compensation reroutes availability -> search_policy",
+          r["name"] == "search_policy" and r["params"].get("query") == msg,
+          str(r))
+
+    # 7. bicycle policy: schema-shaped params -> real {"query": ...}
+    msg = "What is the company policy on travelling with a bicycle on national rail?"
+    r = _one(
+        {"name": "search_policy",
+         "params": {"properties": {"query": {"type": "string"}},
+                    "type": "object", "required": ["query"]}},
+        msg,
+    )
+    check("7) search_policy schema params -> {'query': <message>}",
+          r["name"] == "search_policy"
+          and r["params"] == {"query": msg},
+          str(r))
+
+
+# ── Extra robustness checks ───────────────────────────────────────────────────
+
+def section_extra():
+    print("\n=== Extra: typo id + empty travel_date ===")
+
+    # station_id typo correction inside a real tool call: MR01 -> NR01
+    r = _one(
+        {"name": "check_national_rail_availability",
+         "params": {"origin_id": "MR01", "destination_id": "NR05"}},
+        "Trains from MR01 to NR05?",
+    )
+    check("typo MR01 in call corrected -> NR01",
+          r["params"]["origin_id"] == "NR01"
+          and r["params"]["destination_id"] == "NR05",
+          str(r))
+
+    # empty travel_date must be dropped (never sent as "")
+    r = _one(
+        {"name": "check_national_rail_availability",
+         "params": {"origin_id": "NR01", "destination_id": "NR05",
+                    "travel_date": ""}},
+        "Trains from NR01 to NR05?",
+    )
+    check("empty travel_date dropped (not '')",
+          "travel_date" not in r["params"],
+          str(r))
+
+
+def section_runagent():
+    """End-to-end: a correct native call must drive the result WITHOUT the
+    deterministic fallback overwriting it."""
+    print("\n=== run_agent: native selection drives result (no fallback override) ===")
+
+    # Make the agent run the Ollama (native) path and return whatever data the
+    # tool produces, then capture the debug trace.
+    agent.llm.provider = "ollama"
+    captured = {}
+
+    def _fake_avail(**params):
+        captured["called_with"] = params
+        return [{"schedule_id": "NRX1", "origin_id": params.get("origin_id"),
+                 "destination_id": params.get("destination_id")}]
+
+    orig = agent.query_national_rail_availability
+    agent.query_national_rail_availability = _fake_avail
+    try:
+        # Native already chose the right tool with valid (normalised) ids.
+        agent.llm.next_tool_calls = [
+            {"name": "check_national_rail_availability",
+             "params": {"origin_id": "NR01", "destination_id": "NR05"}}
+        ]
+        _, _, debug = agent.run_agent(
+            "Are there trains from NR01 to NR05?", history=[], debug=True,
+        )
+        check("native availability call executed with NR01->NR05",
+              captured.get("called_with", {}).get("origin_id") == "NR01"
+              and captured.get("called_with", {}).get("destination_id") == "NR05",
+              str(captured.get("called_with")))
+        check("fallback deferred to native (skipped, not overwritten)",
+              "Fallback skipped" in debug and "Fallback:" not in debug,
+              "fallback fired" if "Fallback:" in debug else "ok")
+    finally:
+        agent.query_national_rail_availability = orig
+        agent.llm.provider = "stub"
+        agent.llm.next_tool_calls = []
+
+
+def main() -> int:
+    print("TransitFlow — Tool-Selection / Normalisation Tests")
+    section_helpers()
+    section_scenarios()
+    section_extra()
+    section_runagent()
+
+    passed = sum(1 for _, ok, _ in RESULTS if ok)
+    failed = len(RESULTS) - passed
+    print(f"\n{'=' * 60}")
+    print(f"  {passed} passed, {failed} failed")
+    print(f"{'=' * 60}")
+    if failed:
+        print("\nFailed checks:")
+        for name, ok, detail in RESULTS:
+            if not ok:
+                print(f"  - {name} :: {detail}")
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
