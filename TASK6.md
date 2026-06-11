@@ -37,16 +37,19 @@ This file documents every file modified or added for the bonus extension.
   - Purpose: support the FastAPI/uvicorn server and the WebSocket real-time notification channel.
 
 - `skeleton/notifications.py`
-  - Added as a new file containing the `NotificationManager` class and a shared `notifications` singleton.
+  - Added as a new file with a `# TASK 6 EXTENSION:` marker on the first line.
+  - Contains the `NotificationManager` class and a shared `notifications` singleton.
   - Manages a set of connected WebSocket clients (thread-safe), exposes a `websocket_endpoint` handler, a `broadcast` coroutine, and a `notify` method that schedules broadcasts onto the server event loop from worker threads.
   - Purpose: push real-time booking and cancellation notifications to all connected browsers.
 
 - `skeleton/server.py`
-  - Added as a new file that builds a FastAPI application, mounts the Gradio UI at `/`, and registers the `/ws/notifications` WebSocket endpoint.
+  - Added as a new file with a `# TASK 6 EXTENSION:` marker on the first line.
+  - Builds a FastAPI application, mounts the Gradio UI at `/`, and registers the `/ws/notifications` WebSocket endpoint.
   - Captures the running event loop on startup so background notifications can be dispatched, and exposes a `run()` entry point served by uvicorn (default port 7860).
   - Purpose: serve the Gradio UI and the live-notification WebSocket from a single ASGI server.
 
 - `skeleton/agent.py`
+  - Added a `# TASK 6 EXTENSION:` marker near the top.
   - Added an import of the `notifications` singleton.
   - After a successful `create_booking`, emits a `booking` notification (booking id, schedule id, travel date).
   - After a successful `cancel_booking`, emits a `cancellation` notification (booking id, refund amount).
@@ -65,6 +68,7 @@ This file documents every file modified or added for the bonus extension.
   - Purpose: let the vector seeder check existence before inserting.
 
 - `skeleton/seed_vectors.py` (idempotent seeding)
+  - Added a `# TASK 6 EXTENSION:` marker near the top.
   - Skips any document already stored under the same `(title, source_file)` before embedding, so re-running inserts zero duplicate policy documents / embeddings.
   - Forces `stdout` to UTF-8 so the emoji status lines do not crash the seeder on a Windows cp950 console.
   - Database objects referenced: table `policy_documents`. Vector `schema.sql` is intentionally NOT modified (embedding stays `vector(768)`).
@@ -79,7 +83,7 @@ This file documents every file modified or added for the bonus extension.
   - Database tables referenced (indirectly via queries): `bookings`, `national_rail_schedules`, `metro_schedules`.
   - Purpose: add CSV export, graphical route visualization, and real-time notifications to the dashboard.
 
-- `DESIGN_DOCUMENT.md`
+- `Team45_DESIGN_DOC.md`
   - Added Section 7 describing the motivation, changes, example queries, and testing evidence for this extension.
 
 - `TASK6.md`

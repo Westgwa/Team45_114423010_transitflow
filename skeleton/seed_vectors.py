@@ -14,6 +14,11 @@ Students: To extend the assistant's knowledge, add entries to the JSON files in
 train-mock-data/ and re-run this script.
 """
 
+# TASK 6 EXTENSION: idempotent RAG seeding — skips any policy document already
+# stored under the same (title, source_file) before embedding, so re-running the
+# seeder inserts zero duplicates. Also forces stdout to UTF-8 so the emoji status
+# lines do not crash the seeder on a non-UTF-8 (Windows cp950) console.
+
 import json
 import os
 import sys
