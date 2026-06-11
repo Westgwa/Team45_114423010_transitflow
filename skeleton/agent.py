@@ -145,6 +145,12 @@ def _resolve_station_id(value, network_hint: Optional[str] = None) -> Optional[s
     if _STATION_ID_RE.match(text):
         return text.upper()
 
+    # An id embedded anywhere in the text, e.g. "Stonehaven (NR05)" (which is what
+    # _inject_station_ids produces) or "the NR05 platform" -> NR05.
+    embedded = re.search(r"\b(MS|NR)\s?(\d{2})\b", text, re.IGNORECASE)
+    if embedded:
+        return f"{embedded.group(1).upper()}{embedded.group(2)}"
+
     key = text.lower()
 
     def _from_alias(name: str) -> Optional[str]:
@@ -156,9 +162,15 @@ def _resolve_station_id(value, network_hint: Optional[str] = None) -> Optional[s
     if key in _STATION_INDEX:
         return _STATION_INDEX[key]
 
-    # Trim generic suffixes ("Central Station", "Ferndale Halt", ...) and retry.
-    trimmed = re.sub(r"\b(station|halt|junction|stop)\b", "", key).strip()
-    trimmed = re.sub(r"\s+", " ", trimmed)
+    # Strip generic descriptors ("Central Rail Station", "Ferndale Halt",
+    # "National Rail Stonehaven", ...) and retry against the alias + name index.
+    trimmed = re.sub(
+        r"\b(national rail|national|rail|metro|underground|tube|city|line|"
+        r"train|station|halt|junction|stop|the)\b",
+        "",
+        key,
+    )
+    trimmed = re.sub(r"\s+", " ", trimmed).strip()
     if trimmed and trimmed in _AMBIGUOUS_STATION_ALIASES:
         return _from_alias(trimmed)
     if trimmed and trimmed in _STATION_INDEX:
@@ -1472,6 +1484,37 @@ JSON:"""
 
         # Drop empty-string / None params (treat them as "not provided").
         params = {k: v for k, v in params.items() if v != "" and v is not None}
+
+        # Final guarantee: any station-bearing field handed to the tool MUST be a
+        # canonical MSxx/NRxx id. Resolve a lingering name (last-resort safety net
+        # so success never depends on the fallback), and skip the call if a station
+        # reference cannot be resolved rather than querying the DB with a name.
+        _hint = (
+            "rail" if tool_name in ("check_national_rail_availability", "get_national_rail_fare")
+            else "metro" if tool_name in ("check_metro_availability", "get_metro_fare", "calculate_metro_fare")
+            else None
+        )
+        _bad_station = None
+        for _field in (
+            "origin_id", "destination_id", "avoid_station_id", "station_id",
+            "origin_station_id", "destination_station_id",
+        ):
+            if _field in params:
+                _val = str(params[_field])
+                if not _STATION_ID_RE.match(_val):
+                    _fixed = _resolve_station_id(_val, _hint)
+                    if _fixed:
+                        params[_field] = _fixed
+                    else:
+                        _bad_station = (_field, _val)
+                        break
+        if _bad_station:
+            if debug:
+                debug_info.append(
+                    f"**Skipped** `{tool_name}` — unresolved station id "
+                    f"{_bad_station[0]}={_bad_station[1]!r} (not MSxx/NRxx)"
+                )
+            continue
 
         missing_required = [
             p for p in _required_params.get(tool_name, set()) if p not in params

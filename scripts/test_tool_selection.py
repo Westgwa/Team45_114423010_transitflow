@@ -152,6 +152,18 @@ def section_helpers():
               {"properties": {"query": {"type": "string"}},
                "type": "object", "required": ["query"]}) is True)
 
+    # Station-name variants that previously leaked to the tool as names.
+    check("resolve 'Central Rail Station' -> NR01",
+          agent._resolve_station_id("Central Rail Station", "rail") == "NR01")
+    check("resolve 'Stonehaven (NR05)' (embedded id) -> NR05",
+          agent._resolve_station_id("Stonehaven (NR05)") == "NR05")
+    check("resolve 'National Rail Stonehaven' -> NR05",
+          agent._resolve_station_id("National Rail Stonehaven", "rail") == "NR05")
+    check("resolve 'Ferndale Halt' -> NR07",
+          agent._resolve_station_id("Ferndale Halt", "rail") == "NR07")
+    check("resolve unknown 'Random Place' -> None",
+          agent._resolve_station_id("Random Place") is None)
+
 
 # ── Scenario checks (the 7 cases from the request) ────────────────────────────
 
@@ -369,6 +381,61 @@ def section_seat_availability():
           str(called))
 
 
+def section_station_guarantee():
+    """The tool must only ever receive MSxx/NRxx ids — names are normalised
+    before the call, and an unresolvable station is skipped, not queried."""
+    print("\n=== Station id guarantee: names -> ids before tool call ===")
+
+    # Normalised single call: name variants -> ids.
+    out = agent._normalize_tool_calls(
+        [{"name": "check_national_rail_availability",
+          "params": {"origin_id": "Central Rail Station",
+                     "destination_id": "Stonehaven (NR05)"}}],
+        "Seats from Central Rail Station to Stonehaven (NR05)?",
+    )
+    check("normalise 'Central Rail Station'/'Stonehaven (NR05)' -> NR01/NR05",
+          out[0]["params"]["origin_id"] == "NR01"
+          and out[0]["params"]["destination_id"] == "NR05",
+          str(out))
+
+    # Execution guard: a resolvable name reaches the tool as an id.
+    called, _ = _run_native_empty("Are there seats from Central Station to Stonehaven?")
+    check("run_agent: Central Station/Stonehaven reach tool as NR01/NR05",
+          called is not None
+          and called.get("origin_id") == "NR01"
+          and called.get("destination_id") == "NR05",
+          str(called))
+
+    # Execution guard: an UNRESOLVABLE station must NOT be queried with a name.
+    agent.llm.provider = "ollama"
+    agent.llm.next_tool_calls = [
+        {"name": "check_national_rail_availability",
+         "params": {"origin_id": "Nowhereville", "destination_id": "Stonehaven"}}
+    ]
+    seen = {}
+
+    def _capture(**p):
+        seen["params"] = p
+        return []
+
+    orig = agent.query_national_rail_availability
+    agent.query_national_rail_availability = _capture
+    try:
+        _, _, debug = agent.run_agent(
+            "Seats from Nowhereville to Stonehaven?", history=[], debug=True)
+    finally:
+        agent.query_national_rail_availability = orig
+        agent.llm.provider = "stub"
+        agent.llm.next_tool_calls = []
+    # Either it was skipped (no call), or any call made used a valid id — never a name.
+    ok = "params" not in seen or (
+        agent._STATION_ID_RE.match(str(seen["params"].get("origin_id", "")))
+        and agent._STATION_ID_RE.match(str(seen["params"].get("destination_id", "")))
+    )
+    check("unresolvable station never reaches DB as a name",
+          ok, f"called_with={seen.get('params')}")
+
+
 def section_single_tool():
     """A multi-tool native selection must collapse to the single best tool."""
     print("\n=== Single-tool selection: collapse multi-tool native results ===")
@@ -444,6 +511,7 @@ def main() -> int:
     section_extra()
     section_runagent()
     section_seat_availability()
+    section_station_guarantee()
     section_single_tool()
 
     passed = sum(1 for _, ok, _ in RESULTS if ok)
