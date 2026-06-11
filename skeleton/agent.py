@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # TASK 6 EXTENSION: Emits real-time booking/cancellation notifications via the NotificationManager.
 
+import copy
 import json
 import re
 from datetime import date
@@ -1227,7 +1228,10 @@ JSON:"""
     # NEVER returns [] — it then flows through normalise -> validate -> execute as
     # a native call, not as a late fallback.
     _intent = _classify_intent(user_message)
-    _llm_selection = list(tool_calls) if tool_calls else []
+    # Deep-copy the raw LLM selection so the "Native tool call" debug line keeps
+    # the original values (e.g. optimise_by="fastest") even after normalisation
+    # mutates the live params dict in place (e.g. -> "time").
+    _llm_selection = copy.deepcopy(tool_calls) if tool_calls else []
     _intent_seeded = False
     if not tool_calls and _intent == "availability":
         _seed = _seed_availability_call(user_message)
