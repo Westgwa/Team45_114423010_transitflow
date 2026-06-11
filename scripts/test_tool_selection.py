@@ -286,6 +286,43 @@ def section_extra():
           "travel_date" not in r["params"],
           str(r))
 
+    # placeholder travel_date 'null' must be dropped (else Postgres date error)
+    r = _one(
+        {"name": "check_national_rail_availability",
+         "params": {"origin_id": "Central", "destination_id": "Stonehaven",
+                    "travel_date": "null"}},
+        "Seats from Central to Stonehaven?",
+    )
+    check("travel_date 'null' dropped + names -> NR01/NR05",
+          "travel_date" not in r["params"]
+          and r["params"]["origin_id"] == "NR01"
+          and r["params"]["destination_id"] == "NR05",
+          str(r))
+
+    # a non-ISO travel_date is dropped rather than passed to the DB
+    r = _one(
+        {"name": "check_national_rail_availability",
+         "params": {"origin_id": "NR01", "destination_id": "NR05",
+                    "travel_date": "tomorrow"}},
+        "Trains from NR01 to NR05?",
+    )
+    check("non-ISO travel_date 'tomorrow' dropped",
+          "travel_date" not in r["params"], str(r))
+
+    # a real ISO travel_date is kept
+    r = _one(
+        {"name": "check_national_rail_availability",
+         "params": {"origin_id": "NR01", "destination_id": "NR05",
+                    "travel_date": "2026-08-01"}},
+        "Trains from NR01 to NR05 on 2026-08-01?",
+    )
+    check("ISO travel_date 2026-08-01 kept",
+          r["params"].get("travel_date") == "2026-08-01", str(r))
+
+    check("_is_nullish('null') True / '2026-08-01' False",
+          agent._is_nullish("null") and agent._is_nullish("None")
+          and not agent._is_nullish("2026-08-01"))
+
 
 def section_validation():
     """_validate_tool_call gates the fallback: passes only on a complete,

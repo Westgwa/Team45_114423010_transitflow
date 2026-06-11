@@ -136,6 +136,14 @@ _ROUTE_KEYWORDS = (
     "怎麼去", "怎麼到", "如何到", "路線", "最快", "最便宜", "轉乘", "怎麼走",
 )
 
+# Placeholder strings the LLM emits for a missing value. They must never reach a
+# tool/DB (e.g. travel_date="null" -> Postgres 'invalid input syntax for date').
+_NULLISH_VALUES = {"", "null", "none", "nil", "undefined", "n/a", "na", "nan"}
+
+
+def _is_nullish(value) -> bool:
+    return value is None or (isinstance(value, str) and value.strip().lower() in _NULLISH_VALUES)
+
 
 def _resolve_station_id(value, network_hint: Optional[str] = None) -> Optional[str]:
     """Map a station reference (id OR name OR alias) to a canonical MSxx/NRxx id."""
@@ -454,11 +462,16 @@ def _normalize_tool_calls(tool_calls: list[dict] | None, user_message: str) -> l
             name = "search_policy"
             params = {"query": user_message}
 
-        # (4) Never carry an empty / blank travel_date; drop it so the tool's
-        # own default (or None) applies instead of an empty string -> null.
+        # (4) travel_date: keep it only when it is a real ISO date (YYYY-MM-DD).
+        # Drop blanks and placeholder strings like "null"/"none" so the tool's
+        # default (None = any date) applies instead of querying date = 'null'.
         if "travel_date" in params:
             td = params.get("travel_date")
-            if not isinstance(td, str) or not td.strip():
+            if (
+                not isinstance(td, str)
+                or _is_nullish(td)
+                or not re.match(r"^\d{4}-\d{2}-\d{2}", td.strip())
+            ):
                 params.pop("travel_date", None)
 
         # Network hint from the tool itself (used to disambiguate names like "Central").
@@ -775,7 +788,7 @@ def _validate_tool_call(calls: list[dict]) -> tuple[bool, str]:
 
     missing = [
         r for r in _REQUIRED_BY_TOOL.get(name, [])
-        if not str(params.get(r, "")).strip()
+        if _is_nullish(params.get(r))
     ]
     if missing:
         return False, f"missing required params: {missing}"
@@ -1611,8 +1624,10 @@ JSON:"""
         tool_name = call.get("name", "")
         params = call.get("params") or call.get("parameters", {})
 
-        # Drop empty-string / None params (treat them as "not provided").
-        params = {k: v for k, v in params.items() if v != "" and v is not None}
+        # Drop empty / None / placeholder ("null", "none", ...) params so a junk
+        # value the LLM invented is treated as "not provided" rather than reaching
+        # the DB (e.g. travel_date="null" -> invalid date syntax).
+        params = {k: v for k, v in params.items() if not _is_nullish(v)}
 
         # Final guarantee: any station-bearing field handed to the tool MUST be a
         # canonical MSxx/NRxx id. Resolve a lingering name (last-resort safety net
