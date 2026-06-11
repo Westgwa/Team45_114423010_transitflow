@@ -114,10 +114,11 @@ _AVAILABILITY_KEYWORDS = (
     "any seats", "spare seat", "free seat", "booking availability",
     "can i book", "is it available", "is there a ticket", "any tickets",
     "tickets available", "ticket available",
-    # Chinese: 座位 / 車位 / 有票 / 可訂位 / 預訂
+    # Chinese: 座位 / 車位 / 有票 / 可訂位 / 預訂 / 空位
     "座位", "車位", "有位", "有沒有位", "有沒有座位", "還有座位",
     "有票", "有沒有票", "還有票", "可訂位", "是否可訂位", "能訂位",
     "訂位", "可預訂", "是否可預訂", "預訂",
+    "空位", "有空位", "還有空位", "還有空位嗎", "可不可以訂", "可以訂嗎", "能不能訂",
 )
 
 # Alternative-route / disruption intent (English + Chinese).
@@ -302,6 +303,61 @@ def _station_ids_from_text(text: str) -> list[str]:
             if sid not in ids:
                 ids.append(sid)
     return ids
+
+
+def _classify_intent(message: str) -> Optional[str]:
+    """Classify the dominant intent of a question (most specific first).
+
+    Returns one of 'policy' | 'alternative' | 'availability' | 'route' | None.
+    Used to (a) log the detected intent and (b) seed an availability tool call
+    when native selection comes back empty, so availability never returns [].
+    """
+    low = message.lower()
+    if any(k in low for k in _POLICY_KEYWORDS):
+        return "policy"
+    if any(k in low for k in _ALTERNATIVE_KEYWORDS):
+        return "alternative"
+    if any(k in low for k in _AVAILABILITY_KEYWORDS):
+        return "availability"
+    if any(k in low for k in _ROUTE_KEYWORDS):
+        return "route"
+    return None
+
+
+def _ordered_station_ids(message: str) -> list[str]:
+    """Station ids in the order they appear, resolving names first.
+
+    Injects ids next to known station names ("Central Station" ->
+    "Central Station (NR01)") then reads the ids left-to-right, so origin comes
+    before destination.
+    """
+    augmented = _inject_station_ids(message)
+    out: list[str] = []
+    for m in re.findall(r"\b(MS\d{2}|NR\d{2})\b", augmented, re.IGNORECASE):
+        u = m.upper()
+        if u not in out:
+            out.append(u)
+    return out
+
+
+def _seed_availability_call(message: str) -> Optional[dict]:
+    """Build a deterministic availability tool call from the question.
+
+    Resolves station NAMES to ids (Central Station -> NR01, Stonehaven Station
+    -> NR05). Returns None if two stations cannot be identified, so we never
+    invent a call we cannot fill.
+    """
+    ids = _ordered_station_ids(message)
+    if len(ids) < 2:
+        return None
+    origin_id, destination_id = ids[0], ids[1]
+    params = {"origin_id": origin_id, "destination_id": destination_id}
+    date_m = re.search(r"\d{4}-\d{2}-\d{2}", message)
+    if date_m:
+        params["travel_date"] = date_m.group(0)
+    if origin_id.startswith("MS") and destination_id.startswith("MS"):
+        return {"name": "check_metro_availability", "params": params}
+    return {"name": "check_national_rail_availability", "params": params}
 
 
 def _pick_primary_tool_call(calls: list[dict], user_message: str) -> list[dict]:
@@ -1166,18 +1222,34 @@ JSON:"""
         )
         tool_calls = _parse_tool_calls(selection_response) or []
 
-    # Step 1.4: repair the LLM's tool call (station names -> ids, network
-    # inference, schema-as-params, search_policy query, get_user_bookings
-    # misroute) so a correct native selection no longer needs the fallback.
-    _raw_tool_calls = tool_calls
+    # Step 1.3: intent classification. If native selection came back empty for an
+    # availability question, seed the tool call deterministically so availability
+    # NEVER returns [] — it then flows through normalise -> validate -> execute as
+    # a native call, not as a late fallback.
+    _intent = _classify_intent(user_message)
+    _llm_selection = list(tool_calls) if tool_calls else []
+    _intent_seeded = False
+    if not tool_calls and _intent == "availability":
+        _seed = _seed_availability_call(user_message)
+        if _seed:
+            tool_calls = [_seed]
+            _intent_seeded = True
+
+    # Step 1.4: repair the (native or intent-seeded) tool call (station names ->
+    # ids, network inference, schema-as-params, search_policy query) so a correct
+    # selection no longer needs the fallback.
+    _raw_tool_calls = _llm_selection
     tool_calls = _normalize_tool_calls(tool_calls, user_message)
 
-    # Step 1.5: validate the normalised native call. If it passes, it runs as-is
-    # and the deterministic fallback is skipped entirely.
+    # Step 1.5: validate the normalised call. If it passes, it runs as-is and the
+    # deterministic fallback is skipped entirely.
     native_valid, _validation_reason = _validate_tool_call(tool_calls)
 
     if debug:
+        debug_info.append(f"**Intent detected:** {_intent or 'none'}")
         debug_info.append(f"**Native tool call:** {_raw_tool_calls if _raw_tool_calls else '[]'}")
+        if _intent_seeded:
+            debug_info.append(f"**Intent-seeded availability call:** {tool_calls}")
         debug_info.append(f"**Normalised tool call:** {tool_calls if tool_calls else '[]'}")
         debug_info.append(
             f"**Validation result:** {'passed' if native_valid else 'failed'}"

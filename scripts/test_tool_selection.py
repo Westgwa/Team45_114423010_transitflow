@@ -493,6 +493,75 @@ def section_station_guarantee():
           ok, f"called_with={seen.get('params')}")
 
 
+def _run_native_empty_debug(message: str):
+    """Run run_agent with native [] and return (called_with, debug)."""
+    agent.llm.provider = "ollama"
+    agent.llm.next_tool_calls = []
+    captured = {}
+
+    def _fake_avail(**params):
+        captured["p"] = params
+        return [{"schedule_id": "NRX1", **params}]
+
+    orig = agent.query_national_rail_availability
+    agent.query_national_rail_availability = _fake_avail
+    try:
+        _, _, debug = agent.run_agent(message, history=[], debug=True)
+    finally:
+        agent.query_national_rail_availability = orig
+        agent.llm.provider = "stub"
+        agent.llm.next_tool_calls = []
+    return captured.get("p"), debug
+
+
+def section_intent_seeding():
+    """Native [] for an availability question must be SEEDED into a
+    check_national_rail_availability call (not left to the late fallback)."""
+    print("\n=== Intent seeding: availability never returns [] ===")
+
+    # _classify_intent
+    check("classify 'available seats ...' -> availability",
+          agent._classify_intent("Are there available seats from NR01 to NR05?") == "availability")
+    check("classify '有沒有座位 ... 可不可以訂' -> availability",
+          agent._classify_intent("NR01 到 NR05 有沒有座位？可不可以訂？") == "availability")
+    check("classify 'tickets available ...' -> availability",
+          agent._classify_intent("Are tickets available from NR01 to NR05?") == "availability")
+
+    # _seed_availability_call resolves names -> ids in order
+    seed = agent._seed_availability_call("Any seats from Central Station to Stonehaven Station?")
+    check("seed Central Station/Stonehaven Station -> NR01/NR05",
+          seed is not None and seed["name"] == "check_national_rail_availability"
+          and seed["params"]["origin_id"] == "NR01"
+          and seed["params"]["destination_id"] == "NR05",
+          str(seed))
+
+    # End-to-end: native [] + availability -> seeded, validated, fallback skipped
+    called, debug = _run_native_empty_debug(
+        "Are there available seats from Central Station to Stonehaven Station?")
+    check("EN names, native [] -> tool called with NR01/NR05",
+          called is not None
+          and called.get("origin_id") == "NR01"
+          and called.get("destination_id") == "NR05",
+          str(called))
+    check("debug shows 'Intent detected:** availability'",
+          "Intent detected:** availability" in debug)
+    check("debug shows intent-seeded availability call",
+          "Intent-seeded availability call" in debug)
+    check("debug shows Validation passed + fallback skipped (no forced **Fallback:**)",
+          "Validation result:** passed" in debug
+          and "Fallback skipped:** native call is valid" in debug
+          and "**Fallback:**" not in debug,
+          "forced fallback fired" if "**Fallback:**" in debug else "ok")
+
+    # Chinese availability also seeds.
+    called, debug = _run_native_empty_debug("NR01 到 NR05 有沒有座位？可不可以訂？")
+    check("ZH availability, native [] -> tool called with NR01/NR05",
+          called is not None
+          and called.get("origin_id") == "NR01"
+          and called.get("destination_id") == "NR05",
+          str(called))
+
+
 def section_single_tool():
     """A multi-tool native selection must collapse to the single best tool."""
     print("\n=== Single-tool selection: collapse multi-tool native results ===")
@@ -570,6 +639,7 @@ def main() -> int:
     section_runagent()
     section_seat_availability()
     section_station_guarantee()
+    section_intent_seeding()
     section_single_tool()
 
     passed = sum(1 for _, ok, _ in RESULTS if ok)
