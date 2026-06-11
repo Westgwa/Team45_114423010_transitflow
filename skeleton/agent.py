@@ -71,6 +71,201 @@ def _inject_station_ids(text: str) -> str:
     return result
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool-call normalisation / repair layer
+# Runs on whatever the LLM (native or prompt router) selected, BEFORE the
+# deterministic fallback, so a single good native call is enough end-to-end and
+# does not depend on the fallback. It fixes the recurring native-selection bugs:
+#   * station names instead of station_ids   -> map to MSxx / NRxx
+#   * missing / wrong `network`              -> infer from the resolved ids
+#   * params filled with a JSON *schema*     -> rebuild real arguments
+#   * search_policy missing its query        -> use the user's message
+#   * general policy routed to get_user_bookings -> reroute to search_policy
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STATION_ID_RE = re.compile(r"^(MS|NR)\d{2}$", re.IGNORECASE)
+
+# Bare names that exist on BOTH networks; resolved using the tool's network hint.
+_AMBIGUOUS_STATION_ALIASES: dict[str, dict[str, str]] = {
+    "central": {"metro": "MS01", "rail": "NR01"},
+    "old town": {"metro": "MS07", "rail": "NR03"},
+    "ferndale": {"metro": "MS15", "rail": "NR07"},
+}
+
+_POLICY_KEYWORDS = (
+    "policy", "policies", "refund", "compensation", "entitled", "entitlement",
+    "delay", "delayed", "luggage", "bicycle", "bike", "pet", "pets", "rules",
+    "ticket type", "fare evasion", "child fare", "conduct",
+)
+
+_PERSONAL_KEYWORDS = (
+    "my booking", "my ticket", "my trip", "my journey", "my reservation",
+    "my purchase", "booking history", "my history", "show my", "view my",
+)
+
+
+def _resolve_station_id(value, network_hint: Optional[str] = None) -> Optional[str]:
+    """Map a station reference (id OR name OR alias) to a canonical MSxx/NRxx id."""
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", str(value).strip())
+    if not text:
+        return None
+    if _STATION_ID_RE.match(text):
+        return text.upper()
+
+    key = text.lower()
+
+    def _from_alias(name: str) -> Optional[str]:
+        opts = _AMBIGUOUS_STATION_ALIASES[name]
+        return opts.get(network_hint) or opts.get("rail") or next(iter(opts.values()))
+
+    if key in _AMBIGUOUS_STATION_ALIASES:
+        return _from_alias(key)
+    if key in _STATION_INDEX:
+        return _STATION_INDEX[key]
+
+    # Trim generic suffixes ("Central Station", "Ferndale Halt", ...) and retry.
+    trimmed = re.sub(r"\b(station|halt|junction|stop)\b", "", key).strip()
+    trimmed = re.sub(r"\s+", " ", trimmed)
+    if trimmed and trimmed in _AMBIGUOUS_STATION_ALIASES:
+        return _from_alias(trimmed)
+    if trimmed and trimmed in _STATION_INDEX:
+        return _STATION_INDEX[trimmed]
+
+    return None
+
+
+def _infer_network(origin_id: Optional[str], destination_id: Optional[str]) -> str:
+    """MS+MS -> 'metro', NR+NR -> 'rail', any MS/NR mix (cross-system) -> 'auto'."""
+    o = (origin_id or "").upper()
+    d = (destination_id or "").upper()
+    if o.startswith("MS") and d.startswith("MS"):
+        return "metro"
+    if o.startswith("NR") and d.startswith("NR"):
+        return "rail"
+    return "auto"
+
+
+def _infer_optimise_by(text: str) -> str:
+    low = text.lower()
+    cost_words = (
+        "cheap", "cheapest", "lowest cost", "least expensive",
+        "lowest fare", "fare", "price", "cost",
+    )
+    return "cost" if any(w in low for w in cost_words) else "time"
+
+
+def _params_look_like_schema(params) -> bool:
+    """True when the LLM put a JSON *schema* into params instead of arguments."""
+    if not isinstance(params, dict):
+        return False
+    if params.get("type") == "object":
+        return True
+    return bool({"properties", "required"} & set(params.keys()))
+
+
+def _station_ids_from_text(text: str) -> list[str]:
+    """Best-effort ordered station ids in a message: explicit ids first, else names."""
+    ids: list[str] = []
+    for m in re.findall(r"\b(MS\d{2}|NR\d{2})\b", text, re.IGNORECASE):
+        u = m.upper()
+        if u not in ids:
+            ids.append(u)
+    if ids:
+        return ids
+
+    padded = " " + re.sub(r"\s+", " ", text.lower()) + " "
+    for name in sorted(_STATION_INDEX, key=len, reverse=True):
+        if f" {name} " in padded or f" {name}(" in padded or f"{name}," in padded:
+            sid = _STATION_INDEX[name]
+            if sid not in ids:
+                ids.append(sid)
+    return ids
+
+
+def _normalize_tool_calls(tool_calls: list[dict] | None, user_message: str) -> list[dict]:
+    """Repair LLM-selected tool calls so they carry valid, complete arguments."""
+    if not tool_calls:
+        return tool_calls or []
+
+    msg_ids = _station_ids_from_text(user_message)
+    low = user_message.lower()
+    is_policy = any(k in low for k in _POLICY_KEYWORDS)
+    is_personal = any(k in low for k in _PERSONAL_KEYWORDS)
+
+    repaired: list[dict] = []
+    for call in tool_calls:
+        name = call.get("name", "")
+        params = call.get("params")
+        if params is None:
+            params = call.get("parameters")
+        if not isinstance(params, dict):
+            params = {}
+
+        # (6) params accidentally filled with a JSON schema -> drop, rebuild below.
+        if _params_look_like_schema(params):
+            params = {}
+
+        # Network hint from the tool itself (used to disambiguate names like "Central").
+        if name in ("check_national_rail_availability", "get_national_rail_fare"):
+            hint = "rail"
+        elif name in ("check_metro_availability", "get_metro_fare", "calculate_metro_fare"):
+            hint = "metro"
+        else:
+            hint = None
+
+        # (1) Resolve every station-bearing field from name/alias to MSxx/NRxx.
+        for field in (
+            "origin_id", "destination_id", "avoid_station_id", "station_id",
+            "origin_station_id", "destination_station_id",
+        ):
+            if params.get(field) not in (None, ""):
+                resolved = _resolve_station_id(params[field], hint)
+                if resolved:
+                    params[field] = resolved
+
+        # (2) Recover missing origin/destination from the message for path tools.
+        if name in (
+            "find_route", "find_alternative_routes",
+            "check_national_rail_availability", "check_metro_availability",
+        ):
+            if not params.get("origin_id") and len(msg_ids) >= 1:
+                params["origin_id"] = msg_ids[0]
+            if not params.get("destination_id") and len(msg_ids) >= 2:
+                params["destination_id"] = msg_ids[1]
+
+        # (7) A general policy question must not call get_user_bookings.
+        if name == "get_user_bookings" and is_policy and not is_personal:
+            name = "search_policy"
+            params = {"query": user_message}
+
+        # (6) search_policy always carries the real question as `query`.
+        if name == "search_policy":
+            q = params.get("query")
+            if not isinstance(q, str) or not q.strip():
+                params = {"query": user_message}
+
+        # (3)(4) network is derived from the resolved ids, so a cross-system pair
+        # becomes "auto" even if the LLM said "metro".
+        if name == "find_route":
+            o, d = params.get("origin_id"), params.get("destination_id")
+            if o and d:
+                params["network"] = _infer_network(o, d)
+            else:
+                params.setdefault("network", "auto")
+            params.setdefault("optimise_by", _infer_optimise_by(user_message))
+
+        if name == "find_alternative_routes":
+            o, d = params.get("origin_id"), params.get("destination_id")
+            if o and d:
+                params["network"] = _infer_network(o, d)
+
+        repaired.append({"name": name, "params": params})
+
+    return repaired
+
+
 SYSTEM_PROMPT = """You are TransitFlow, a transit assistant for a dual-network system.
 
 Networks: City Metro MS01-MS20 (lines M1-M4) | National Rail NR01-NR10 (lines NR1-NR2)
@@ -440,7 +635,10 @@ def _execute_tool(
                 network=params.get("network", "auto"),
             )
 
-            result = [{"route_number": i + 1, "legs": r} for i, r in enumerate(routes)]
+            # Pass the full route dicts through (path, legs, total_time_min, and the
+            # separated avoid_station_ids / related_avoid_station_ids) instead of
+            # nesting the whole dict under a mislabelled "legs" key.
+            result = [{**r, "route_number": i + 1} for i, r in enumerate(routes)]
 
         elif tool_name == "get_delay_ripple":
             result = query_delay_ripple(
@@ -603,9 +801,16 @@ STATIONS: Metro=MS01-MS20, Rail=NR01-NR10
 USER: {current_user_email or "not logged in"}
 
 Rules:
+- params are the ACTUAL arguments, never a JSON schema (no type/properties/required keys).
+- Stations must be ids (MSxx / NRxx). Convert names to ids: Central Station->NR01,
+  Central Square->MS01, Stonehaven->NR05, Old Town->MS07, Sunnyvale->MS18.
+- network: both MSxx -> "metro"; both NRxx -> "rail"; MSxx+NRxx mix (cross-system) -> "auto".
+- find_route must include origin_id, destination_id, network, optimise_by
+  (optimise_by="cost" for cheapest/lowest-fare, else "time").
 - Route/path/direction/fastest/cheapest/how-to-get questions: use find_route.
 - Alternative route / closed station / avoid station questions: use find_alternative_routes.
-- Policy/refund/compensation/luggage/bicycle questions: use search_policy.
+- Policy/refund/compensation/luggage/bicycle questions: use search_policy with only {{"query": <user question>}}.
+- Do NOT use get_user_bookings for a general policy question — only for the user's OWN bookings.
 - Booking/cancellation requires login.
 - Never use empty string params.
 
@@ -634,13 +839,22 @@ JSON:"""
             _augmented_message,
             system_prompt=(
                 "You are a tool router. "
+                "params MUST be the actual function arguments — NEVER a JSON schema "
+                "(never output keys like type/properties/required). "
+                "Stations MUST be ids: metro=MSxx (MS01-MS20), national rail=NRxx (NR01-NR10). "
+                "Convert any station NAME to its id (e.g. Central Station->NR01, "
+                "Central Square->MS01, Stonehaven->NR05, Old Town->MS07). "
+                "network: both MSxx -> 'metro'; both NRxx -> 'rail'; a mix of MSxx and "
+                "NRxx (cross-system) -> 'auto'. "
                 "Alternative route / closed station / avoid station questions must use find_alternative_routes. "
-                "Route/directions/fastest/quickest/cheapest/path/how-to-get questions must use find_route. "
+                "Route/directions/fastest/quickest/cheapest/path/how-to-get questions must use find_route "
+                "with all of origin_id, destination_id, network, optimise_by. "
                 "Cheapest/lowest fare/lowest cost route questions must set optimise_by='cost'. "
                 "Fastest/quickest/shortest route questions must set optimise_by='time'. "
                 "Metro fare/price/how much questions use get_metro_fare only when the user asks price, not route. "
                 "National rail train/service/schedule questions must use check_national_rail_availability. "
-                "Policy/rules/compensation/luggage/bicycle questions use search_policy. "
+                "Policy/rules/compensation/luggage/bicycle questions use search_policy with only {query: <user question>}; "
+                "do NOT call get_user_bookings for a general policy question — only when the user asks about THEIR own bookings. "
                 "Output only tool calls."
             ),
         )
@@ -657,6 +871,15 @@ JSON:"""
 
         if debug:
             debug_info.append(f"**Tool selection:** {selection_response}")
+
+    # Step 1.4: repair the LLM's tool call (station names -> ids, network
+    # inference, schema-as-params, search_policy query, get_user_bookings
+    # misroute) so a correct native selection no longer needs the fallback.
+    _raw_tool_calls = tool_calls
+    tool_calls = _normalize_tool_calls(tool_calls, user_message)
+
+    if debug and tool_calls and tool_calls != _raw_tool_calls:
+        debug_info.append(f"**Normalised tool call:** {tool_calls}")
 
     # Step 1.5: deterministic fallback / correction
     _lower = _augmented_message.lower()

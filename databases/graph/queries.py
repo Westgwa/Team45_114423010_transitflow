@@ -264,6 +264,12 @@ def query_alternative_routes(
             max_routes=max_routes,
         )
 
+        # Keep the user's request and our connected-interchange expansion in
+        # SEPARATE fields: avoid_station_ids = exactly what the user asked to
+        # avoid; related_avoid_station_ids = interchange counterparts we also
+        # skip so a closed station is not silently reachable via its twin.
+        related_avoid_ids = [sid for sid in avoid_ids if sid != avoid_station_id]
+
         routes = []
         for index, record in enumerate(records, start=1):
             routes.append(
@@ -271,7 +277,8 @@ def query_alternative_routes(
                     "route_number": index,
                     "origin_id": origin_id,
                     "destination_id": destination_id,
-                    "avoid_station_ids": avoid_ids,
+                    "avoid_station_ids": [avoid_station_id],
+                    "related_avoid_station_ids": related_avoid_ids,
                     "total_time_min": record["total_time"],
                     # "path" duplicates "stations" because the grading guide
                     # expects every route dict to expose a path list.
