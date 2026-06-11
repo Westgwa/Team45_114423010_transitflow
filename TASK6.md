@@ -52,6 +52,24 @@ This file documents every file modified or added for the bonus extension.
   - After a successful `cancel_booking`, emits a `cancellation` notification (booking id, refund amount).
   - Purpose: trigger real-time notifications when bookings are created or cancelled through the agent.
 
+- `skeleton/agent.py` (true chat end-to-end integration)
+  - Imported `query_booking_revenue_summary` and `query_trip_history`.
+  - Registered two new agent tools in `TOOLS` and `TOOLS_SCHEMA`: `get_booking_analytics(start_date?, end_date?)` and `get_trip_history()`.
+  - Added the matching `_execute_tool` branches (analytics → `query_booking_revenue_summary` via the `vw_booking_revenue_daily` view; trip history → `query_trip_history`, login enforced).
+  - Added deterministic keyword fallbacks (revenue / analytics / total bookings / trip history …) so the small local model still routes these questions correctly.
+  - Hardened the tool-execution guard to drop empty optional params and skip only on missing *required* params (so all-optional tools like `get_booking_analytics` actually run).
+  - Purpose: make the analytics bonus reachable through the full UI chat → Agent → Tool → DB → LLM → UI loop, not only the sidebar panel.
+
+- `databases/relational/queries.py` (RAG seed de-duplication)
+  - Added the read-only helper `policy_document_exists(title, source_file)`. The provided scaffold `store_policy_document` / `query_policy_vector_search` are left unmodified.
+  - Purpose: let the vector seeder check existence before inserting.
+
+- `skeleton/seed_vectors.py` (idempotent seeding)
+  - Skips any document already stored under the same `(title, source_file)` before embedding, so re-running inserts zero duplicate policy documents / embeddings.
+  - Forces `stdout` to UTF-8 so the emoji status lines do not crash the seeder on a Windows cp950 console.
+  - Database objects referenced: table `policy_documents`. Vector `schema.sql` is intentionally NOT modified (embedding stays `vector(768)`).
+  - Purpose: satisfy the "seeding must not produce duplicate data" requirement in the Python layer rather than the schema.
+
 - `skeleton/ui.py` (bonus-items additions on top of the earlier Task 6 work)
   - Added `_write_csv_file()` helper plus `export_booking_analytics()` and `export_trip_history()` to generate downloadable CSV reports.
   - Added "Export analytics CSV" and "Export trip history CSV" buttons with file-download outputs.

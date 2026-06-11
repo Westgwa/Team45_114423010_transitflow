@@ -21,8 +21,15 @@ import time
 
 sys.path.insert(0, ".")
 
+# The status lines below use emoji; force UTF-8 so seeding does not crash on a
+# non-UTF-8 console (e.g. Windows cp950) during live testing.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
+
 from skeleton.llm_provider import llm
-from databases.relational.queries import store_policy_document
+from databases.relational.queries import store_policy_document, policy_document_exists
 
 _DATA_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "train-mock-data")
@@ -88,7 +95,20 @@ def seed():
     documents = build_documents()
     print(f"📄 Embedding {len(documents)} policy documents using {llm.chat_provider}...\n")
 
+    inserted = 0
+    skipped = 0
+
     for i, doc in enumerate(documents):
+        # Re-run safety: skip any document already stored under the same
+        # (title, source_file). This makes seed_vectors.py idempotent without
+        # touching the "do not modify" vector schema — re-running never creates
+        # duplicate policy_documents / embeddings, and it also avoids spending
+        # an embedding API call on a document we would only discard.
+        if policy_document_exists(doc["title"], doc.get("source_file", "")):
+            skipped += 1
+            print(f"  [{i+1}/{len(documents)}] Skipping (already stored): {doc['title']}")
+            continue
+
         print(f"  [{i+1}/{len(documents)}] Embedding: {doc['title']}")
 
         try:
@@ -107,6 +127,7 @@ def seed():
                 source_file=doc.get("source_file", ""),
             )
             print(f"    ✓ Stored as document id={doc_id}")
+            inserted += 1
 
         except Exception as e:
             print(f"    ✗ Failed: {e}")
@@ -115,7 +136,10 @@ def seed():
         if llm.chat_provider == "gemini" and i < len(documents) - 1:
             time.sleep(0.5)
 
-    print(f"\n✅ All {len(documents)} policy documents embedded and stored.")
+    print(
+        f"\n✅ Seeding complete: {inserted} inserted, {skipped} skipped "
+        f"(already present) out of {len(documents)} documents."
+    )
     print("   Test with a similarity search:")
     print("   >>> from skeleton.llm_provider import llm")
     print("   >>> from databases.relational.queries import query_policy_vector_search")

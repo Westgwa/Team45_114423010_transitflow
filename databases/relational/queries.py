@@ -1690,6 +1690,42 @@ def query_policy_vector_search(
             return [dict(row) for row in cur.fetchall()]
 
 
+def policy_document_exists(title: str, source_file: str = "") -> bool:
+    """
+    Return True if a policy document with the same (title, source_file) is
+    already stored.
+
+    Dedup for the RAG seeder lives here (and in skeleton/seed_vectors.py), NOT
+    in the vector schema: the policy_documents CREATE TABLE is the provided
+    "do not modify" scaffold, so re-run safety is handled in Python by checking
+    existence before inserting. (title, source_file) is the natural identity of
+    a seeded policy chunk, so it is what we de-duplicate on.
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            if not _table_exists(cur, "policy_documents"):
+                return False
+
+            if _column_exists(cur, "policy_documents", "source_file"):
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM policy_documents
+                    WHERE title = %s
+                      AND COALESCE(source_file, '') = %s
+                    LIMIT 1
+                    """,
+                    (title, source_file or ""),
+                )
+            else:
+                cur.execute(
+                    "SELECT 1 FROM policy_documents WHERE title = %s LIMIT 1",
+                    (title,),
+                )
+
+            return cur.fetchone() is not None
+
+
 def store_policy_document(
     title: str,
     category: str,

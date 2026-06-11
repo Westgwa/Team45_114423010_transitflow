@@ -20,6 +20,11 @@ from databases.relational.queries import (
     execute_booking,
     execute_cancellation,
     query_policy_vector_search,
+    # TASK 6 EXTENSION: booking-analytics query exposed as an agent tool so the
+    # bonus feature is reachable end-to-end (UI chat -> agent -> tool -> DB ->
+    # LLM -> UI), not only through the sidebar dashboard panel.
+    query_booking_revenue_summary,
+    query_trip_history,
 )
 from databases.graph.queries import (
     query_shortest_route,
@@ -224,6 +229,32 @@ TOOLS = [
         },
         "required": ["station_id"],
     },
+    {
+        # TASK 6 EXTENSION: booking-revenue analytics, reachable from the chat.
+        "name": "get_booking_analytics",
+        "description": (
+            "Get booking revenue analytics: total / active / cancelled booking counts, "
+            "total revenue and total refunds, optionally limited to a travel-date range. "
+            "Use for revenue, sales, income, earnings, analytics, how many bookings, "
+            "or booking-statistics questions. Dates are optional (YYYY-MM-DD)."
+        ),
+        "parameters": {
+            "start_date": {"type": "string"},
+            "end_date": {"type": "string"},
+        },
+        "required": [],
+    },
+    {
+        # TASK 6 EXTENSION: detailed personal trip history, reachable from the chat.
+        "name": "get_trip_history",
+        "description": (
+            "Retrieve the logged-in user's detailed national-rail trip history "
+            "(booking id, route, date, fare class, price, status). Requires login. "
+            "Use for 'my trips', 'my trip history', 'my past journeys' questions."
+        ),
+        "parameters": {},
+        "required": [],
+    },
 ]
 
 
@@ -240,7 +271,9 @@ cancel_booking(booking_id)
 get_user_bookings()
 search_policy(query)
 find_alternative_routes(origin_id, destination_id, avoid_station_id, network?)
-get_delay_ripple(station_id, hops?)"""
+get_delay_ripple(station_id, hops?)
+get_booking_analytics(start_date?, end_date?)
+get_trip_history()"""
 
 
 def _execute_tool(
@@ -414,6 +447,21 @@ def _execute_tool(
                 delayed_station_id=params["station_id"],
                 hops=params.get("hops", 2),
             )
+
+        elif tool_name == "get_booking_analytics":
+            # TASK 6 EXTENSION: end-to-end path for the analytics bonus —
+            # the LLM-selected tool drives the same rollup-view query that backs
+            # the dashboard, so the chat can answer revenue/cancellation questions.
+            result = query_booking_revenue_summary(
+                start_date=params.get("start_date") or None,
+                end_date=params.get("end_date") or None,
+            )
+
+        elif tool_name == "get_trip_history":
+            # TASK 6 EXTENSION: detailed trip history through the agent (login required).
+            if not current_user_email:
+                return json.dumps({"error": "You must be logged in to view your trip history."})
+            result = query_trip_history(current_user_email, limit=20)
 
         else:
             result = {"error": f"Unknown tool: {tool_name}"}
@@ -924,16 +972,69 @@ JSON:"""
         if any(kw in _lower for kw in _personal_triggers):
             _fallback("get_user_bookings", {}, "personal booking query")
 
+    # 4. Booking analytics / revenue — TASK 6 EXTENSION end-to-end through the agent
+    if not tool_calls:
+        _analytics_triggers = {
+            "revenue",
+            "analytics",
+            "total bookings",
+            "how many bookings",
+            "total income",
+            "income",
+            "sales",
+            "earnings",
+            "refund total",
+            "total refund",
+            "booking statistics",
+            "booking stats",
+        }
+
+        if any(kw in _lower for kw in _analytics_triggers):
+            _dates = re.findall(r"\d{4}-\d{2}-\d{2}", user_message)
+            _params: dict = {}
+            if len(_dates) >= 1:
+                _params["start_date"] = _dates[0]
+            if len(_dates) >= 2:
+                _params["end_date"] = _dates[1]
+            _fallback("get_booking_analytics", _params, "forced analytics query")
+
+    # 5. Detailed trip history — TASK 6 EXTENSION (login required)
+    if current_user_email and not tool_calls:
+        _trip_triggers = {
+            "trip history",
+            "my trips",
+            "past journeys",
+            "past trips",
+            "journey history",
+            "travel history",
+        }
+
+        if any(kw in _lower for kw in _trip_triggers):
+            _fallback("get_trip_history", {}, "detailed trip-history query")
+
     # Step 2: Execute each tool call
     tool_results = []
+
+    # Map tool -> required params so we can drop empty *optional* params (e.g. the
+    # LLM often fills get_booking_analytics' optional start_date/end_date with "")
+    # while still skipping a call that is missing a genuinely required value.
+    _required_params = {t["name"]: set(t.get("required", [])) for t in TOOLS}
 
     for call in tool_calls:
         tool_name = call.get("name", "")
         params = call.get("params") or call.get("parameters", {})
 
-        if any(v == "" for v in params.values()):
+        # Drop empty-string / None params (treat them as "not provided").
+        params = {k: v for k, v in params.items() if v != "" and v is not None}
+
+        missing_required = [
+            p for p in _required_params.get(tool_name, set()) if p not in params
+        ]
+        if missing_required:
             if debug:
-                debug_info.append(f"**Skipped** `{tool_name}` — empty params: {params}")
+                debug_info.append(
+                    f"**Skipped** `{tool_name}` — missing required params: {missing_required}"
+                )
             continue
 
         if debug:

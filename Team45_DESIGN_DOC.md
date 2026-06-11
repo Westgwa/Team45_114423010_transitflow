@@ -389,6 +389,47 @@ queries already added above.
     `__main__` block of `skeleton/ui.py` now launches via this server.
   - `requirements.txt` — adds `fastapi`, `uvicorn`, and `websockets`.
 
+**Agent tool-calling integration — true chat end-to-end (`skeleton/agent.py`):**
+
+The first iterations surfaced the bonus data through sidebar panels (UI → DB → UI). To make
+the flagship analytics feature satisfy the full **UI chat → Agent → Tool Calling → DB →
+Agent/LLM → UI** loop, the analytics and trip-history queries are now also exposed as agent
+tools, so a user can ask for them in natural language in the chat:
+
+- Registered two new tools in the agent's `TOOLS` / `TOOLS_SCHEMA`:
+  - `get_booking_analytics(start_date?, end_date?)` → drives `query_booking_revenue_summary`
+    (the same `vw_booking_revenue_daily` rollup view that backs the dashboard).
+  - `get_trip_history()` → drives `query_trip_history` for the logged-in user (login enforced
+    in the tool handler).
+- Added the matching branches in `_execute_tool`, and deterministic keyword fallbacks
+  (revenue / analytics / total bookings / trip history …) so routing is reliable even with the
+  small local `llama3.2:1b` model.
+- Hardened the tool-execution guard: empty *optional* params (e.g. an LLM filling
+  `start_date=""`) are now dropped, and a call is skipped only when a genuinely **required**
+  param is missing. Previously any empty string aborted the whole call, which prevented
+  all-optional tools like `get_booking_analytics` from ever running.
+
+End-to-end trace (captured via the debug panel), question →
+`Calling: get_booking_analytics({})` → view query → LLM answer
+*"Total booking revenue: \$170.5 USD, Number of bookings: 21"*.
+
+**Idempotent RAG seeding — duplicate prevention (`skeleton/seed_vectors.py`,
+`databases/relational/queries.py`):**
+
+The relational/vector `schema.sql` is left unmodified (the `policy_documents` table and its
+`vector(768)` column are the provided "do not modify" scaffold, and the embedding dimension
+stays 768 to match the Ollama `nomic-embed-text` model). De-duplication is handled in the
+**Python seeding layer**, as required:
+
+- Added `policy_document_exists(title, source_file)` to `queries.py` (a read-only helper —
+  the scaffold `store_policy_document` is untouched).
+- `seed_vectors.py` now skips any document already stored under the same `(title,
+  source_file)` *before* embedding it, so re-running the seeder inserts zero duplicates and
+  spends no extra embedding API calls. Verified: a second run reports
+  `0 inserted, 13 skipped`, and `policy_documents` holds `13 rows / 13 distinct titles`.
+- Also forced `stdout` to UTF-8 in `seed_vectors.py` so the emoji status lines no longer crash
+  the seeder on a non-UTF-8 (Windows cp950) console during live testing.
+
 ### 7.3 Example Queries
 
 All outputs below were captured against the seeded database (20 bookings) on PostgreSQL 16.
